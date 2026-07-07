@@ -24,6 +24,30 @@ export type PersonaInteractionCallbacks = {
   submitResolution?: McpRequestContext["submitResolution"];
 };
 
+type PersonaSummary = { slug: string; name: string; description: string };
+
+/**
+ * Resolve the persona list, preferring the worktree root (where uncommitted
+ * persona files live) and falling back to the repo root when the worktree has
+ * none. Mirrors the fallback in GET /api/v1/personas and dispatch_launch_persona
+ * so all three persona-listing paths agree — a worktree without its own
+ * .dispatch/personas/ still surfaces the repo's personas.
+ */
+export async function resolvePersonaList(
+  listPersonas: (root: string) => Promise<PersonaSummary[]>,
+  worktreeRoot?: string | null,
+  repoRoot?: string | null
+): Promise<PersonaSummary[]> {
+  let personas: PersonaSummary[] = [];
+  if (worktreeRoot) {
+    personas = await listPersonas(worktreeRoot);
+  }
+  if (personas.length === 0 && repoRoot && repoRoot !== worktreeRoot) {
+    personas = await listPersonas(repoRoot);
+  }
+  return personas;
+}
+
 export function registerPersonaInteractionTools(
   server: McpServer,
   allowed: Set<string>,
@@ -33,8 +57,8 @@ export function registerPersonaInteractionTools(
 
   // ── list_personas ────────────────────────────────────────────────
   if (allowed.has("list_personas") && callbacks.listPersonas) {
-    const personaRoot = callbacks.worktreeRoot ?? callbacks.repoRoot;
     const listPersonas = callbacks.listPersonas;
+    const { worktreeRoot, repoRoot } = callbacks;
 
     server.registerTool(
       "list_personas",
@@ -44,16 +68,12 @@ export function registerPersonaInteractionTools(
         inputSchema: {},
       },
       async () => {
-        if (!personaRoot) {
-          return {
-            content: [
-              { type: "text", text: JSON.stringify({ personas: [] }, null, 2) },
-            ],
-            structuredContent: { personas: [] },
-          };
-        }
         try {
-          const personas = await listPersonas(personaRoot);
+          const personas = await resolvePersonaList(
+            listPersonas,
+            worktreeRoot,
+            repoRoot
+          );
           return {
             content: [
               { type: "text", text: JSON.stringify({ personas }, null, 2) },
