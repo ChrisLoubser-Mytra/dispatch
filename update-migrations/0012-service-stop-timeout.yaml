@@ -1,0 +1,62 @@
+id: service-stop-timeout
+title: Bound the Dispatch service stop timeout
+summary: >
+  Add TimeoutStopSec to supported Linux user services so a Dispatch restart
+  cannot sit in systemd's 90-second default stop window. Installs created
+  before this release inherit that default, which turns every in-place update
+  into a long outage that ends in SIGKILL and a failed unit — the server comes
+  back, but far too late for the update flow to confirm it, so the update
+  looks stuck and gets recovered by hand.
+
+alreadySatisfied:
+  description: >
+    The current user's supported systemd Dispatch service already declares a
+    TimeoutStopSec of 60 seconds or less — confirm the loaded value with
+    `systemctl --user show dispatch.service -p TimeoutStopUSec`, not just the
+    unit file text — and its fixed runtime entrypoint is healthy. Verify by
+    configuration only; do not restart the service just to time a shutdown.
+    On hosts without a supported user systemd unit (launchd, system scope,
+    root-owned file, Docker, custom supervisor, or no definition), this
+    migration is a no-op: treat it as satisfied and report why. launchd
+    already bounds stops at 20 seconds and needs no change.
+
+instructions:
+  - >
+    Only modify the current user's ~/.config/systemd/user/dispatch.service
+    managed through systemctl --user. On launchd, system-scope units,
+    root-owned files, Docker, custom supervisors, or a missing definition,
+    this migration is an explicit no-op: report the situation and continue
+    with the remaining plan; do not create or modify another service
+    definition.
+  - >
+    Before invoking the managed update, add TimeoutStopSec=20 under [Service]
+    and run systemctl --user daemon-reload. Confirm the loaded value with
+    systemctl --user show dispatch.service -p TimeoutStopUSec — it should
+    report 20s. Leave every other directive alone; in particular keep
+    KillMode=process from the agent-restart-safety migration, which is what
+    lets tmux-backed agents survive the restart.
+  - >
+    Keep TimeoutStopSec in the unit after the update. The server bounds its
+    own shutdown well inside 20 seconds; this directive is the backstop for
+    the case where it cannot, and without it that case costs 90 seconds of
+    downtime per restart.
+  - Invoke the managed update and complete any other pending migration steps.
+  - >
+    Confirm the health endpoint is healthy, release.json reports the target
+    tag, and that the restart completed without systemd logging
+    "State 'stop-sigterm' timed out" for dispatch.service.
+
+validation:
+  requiredChecks:
+    - service_restarted
+    - health_endpoint
+    - version_converged
+
+rollback:
+  - >
+    Remove TimeoutStopSec from the unit only if this host's process-management
+    policy requires an unbounded stop window, then run systemctl --user
+    daemon-reload.
+  - >
+    Restart Dispatch and confirm the health endpoint returns status=ok and
+    release.json reports the prior healthy tag.

@@ -60,6 +60,41 @@ export type {
 
 export type ReleaseJobKind = "create" | "update";
 
+/**
+ * Hand the restart to the service manager and report anything it says back.
+ *
+ * The old form spawned with `stdio: "ignore"`, so a restart that never got
+ * enqueued — systemctl missing from PATH, no user bus, a conflicting job —
+ * left the update stuck in "restarting" with nothing anywhere to explain it.
+ * The parent is about to be torn down, so this is a best-effort last word,
+ * but it is the only signal the job log will ever get.
+ */
+function spawnServiceRestart(
+  command: string,
+  args: string[],
+  onLog?: (line: string) => void
+): void {
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: ["ignore", "ignore", onLog ? "pipe" : "ignore"],
+  });
+
+  child.on("error", (err) => {
+    onLog?.(`==> failed to invoke ${command}: ${errorMessage(err)}`);
+  });
+  child.on("exit", (code) => {
+    if (code !== 0 && code !== null) {
+      onLog?.(`==> ${command} exited with code ${code}`);
+    }
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    const text = chunk.toString().trim();
+    if (text) onLog?.(`==> ${command}: ${text}`);
+  });
+
+  child.unref();
+}
+
 export type ReleaseStreamClient = {
   clientId: string;
   stream: NodeJS.WritableStream;
@@ -97,7 +132,7 @@ type CreateReleaseRuntimeDeps = {
     onLine?: (line: string) => void
   ) => ReleaseLogStreamProcessor;
   /** Kept injectable so artifact activation can be tested without a service manager. */
-  restartService?: () => void;
+  restartService?: (onLog?: (line: string) => void) => void;
   writeReleaseCandidate?: (candidate: ReleaseCandidate) => Promise<void>;
 };
 
@@ -129,23 +164,26 @@ export function createReleaseRuntime(deps: CreateReleaseRuntimeDeps) {
   const fetchReleaseMetadata = fetchReleaseMetadataImpl;
   const restartService =
     deps.restartService ??
-    (() => {
+    ((onLog?: (line: string) => void) => {
       if (process.platform === "linux") {
-        spawn("systemctl", ["--user", "restart", "dispatch"], {
-          detached: true,
-          stdio: "ignore",
-        }).unref();
+        // --no-block matters: this client runs inside the very unit it is
+        // restarting. Without it systemctl blocks on the restart job while
+        // systemd tears down its own cgroup, and it is still sitting there
+        // when the unit comes back ("Unit process N (systemctl) remains
+        // running after unit stopped"). Enqueue the job and get out.
+        spawnServiceRestart(
+          "systemctl",
+          ["--user", "restart", "--no-block", "dispatch"],
+          onLog
+        );
         return;
       }
       const uid = process.getuid?.() ?? 501;
-      spawn(
+      spawnServiceRestart(
         "launchctl",
         ["kickstart", "-k", `gui/${uid}/com.dispatch.server`],
-        {
-          detached: true,
-          stdio: "ignore",
-        }
-      ).unref();
+        onLog
+      );
     });
   const recordReleaseCandidate =
     deps.writeReleaseCandidate ?? writeReleaseCandidate;
@@ -502,7 +540,7 @@ Suggested workflow:
       detail: "Waiting for the service to come back on the new version.",
     });
 
-    restartService();
+    restartService((line) => appendReleaseLog(job, line));
   }
 
   async function runUpdateJob(job: ReleaseJob): Promise<void> {
