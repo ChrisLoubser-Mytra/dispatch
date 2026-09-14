@@ -154,6 +154,10 @@ import {
 } from "./server/mcp-handlers.js";
 import { createNotificationRuntime } from "./server/notification-runtime.js";
 import {
+  createShutdownBudget,
+  withShutdownDeadline,
+} from "./server/shutdown-budget.js";
+import {
   createStaticThemeRuntime,
   type IconColor,
   VALID_ICON_COLORS,
@@ -173,6 +177,12 @@ import { resolveConfiguredPath } from "./shared/lib/resolve-tilde.js";
 const config = loadConfig();
 const app = Fastify({
   logger: true,
+  // Dispatch keeps hijacked sockets open indefinitely by design — the UI event
+  // stream, MCP sessions, MJPEG viewers, terminal websockets. Fastify's default
+  // ('idle') closes idle connections and then waits for the active ones, so on
+  // any host with a browser tab or a running agent `app.close()` never settles
+  // and SIGTERM hangs until the service manager gives up and sends SIGKILL.
+  forceCloseConnections: true,
   ...(config.tls && { https: { cert: config.tls.cert, key: config.tls.key } }),
 });
 const pool = createPool(config);
@@ -999,6 +1009,17 @@ export async function start() {
 
 export { app, shutdown };
 
+/**
+ * Ceiling on the whole graceful path. An in-place update restarts the service,
+ * so a shutdown that outlives the service manager's stop timeout turns every
+ * update into a SIGKILL, a `failed` unit, and a server that has to be
+ * recovered by hand. Comfortably inside launchd's 20s and the
+ * TimeoutStopSec the installer writes for systemd.
+ */
+const SHUTDOWN_BUDGET_MS = 12_000;
+/** Headroom for the steps themselves to notice their budget and unwind. */
+const SHUTDOWN_FORCE_EXIT_GRACE_MS = 3_000;
+
 let shuttingDown = false;
 async function cleanupAppResources(): Promise<void> {
   if (shuttingDown) {
@@ -1006,30 +1027,67 @@ async function cleanupAppResources(): Promise<void> {
   }
   shuttingDown = true;
 
+  const budget = createShutdownBudget(SHUTDOWN_BUDGET_MS);
+  const step = <T>(work: Promise<T>, preferredMs: number, name: string) =>
+    withShutdownDeadline(
+      work,
+      budget.forStep(preferredMs),
+      name,
+      (details, message) => app.log.warn(details, message)
+    );
+
   streamManager.stopAll();
   agentLifecycleRuntime.stopReconcileLoop();
   authRuntime.stopSessionCleanupTimer();
   autoCheckRuntime.stopScheduler();
-  await serviceResources.shutdown();
+  await step(serviceResources.shutdown(), 2_000, "service-resources");
 
   notificationRuntime.clearPendingWebNotifications();
 
-  await jobService.shutdown();
-  await agentLifecycleRuntime.waitForActiveArchives(10_000);
+  await step(jobService.shutdown(), 3_000, "job-monitors");
+  await step(
+    agentLifecycleRuntime.waitForActiveArchives(budget.forStep(10_000)),
+    10_000,
+    "agent-archives"
+  );
   // Let deliveries that are about to settle record their outcome; anything
   // still waiting on the quiet gate is swept to not-delivered at next start.
-  if (!(await chatService.waitForInFlightDeliveries(5_000))) {
+  const deliveriesSettled = await step(
+    chatService.waitForInFlightDeliveries(budget.forStep(5_000)),
+    5_000,
+    "chat-deliveries"
+  );
+  if (!deliveriesSettled) {
     app.log.warn(
       { pending: chatService.inFlightDeliveryCount },
       "Shutting down with chat deliveries still in flight"
     );
   }
 
-  await pool.end().catch(() => null);
-  await app.close().catch(() => null);
+  // The HTTP server closes before the pool: requests still draining need a
+  // live pool to answer on, and `forceCloseConnections` destroys the hijacked
+  // streams that would otherwise keep `close()` pending forever.
+  await step(app.close(), 4_000, "http-server");
+  await step(pool.end(), 2_000, "database-pool");
 }
 
 async function shutdown(code: number): Promise<void> {
-  await cleanupAppResources();
+  // Last resort. Nothing in cleanup may hold the process past the service
+  // manager's stop timeout, so the exit is scheduled before the work starts
+  // and fires even if an await never returns. Unref'd so a cleanup that
+  // finishes early isn't held open by the timer itself.
+  const forceExit = setTimeout(() => {
+    app.log.error(
+      { budgetMs: SHUTDOWN_BUDGET_MS },
+      "Graceful shutdown exceeded its deadline — exiting now"
+    );
+    process.exit(code);
+  }, SHUTDOWN_BUDGET_MS + SHUTDOWN_FORCE_EXIT_GRACE_MS);
+  forceExit.unref();
+
+  await cleanupAppResources().catch((err) => {
+    app.log.error({ err }, "Shutdown cleanup failed");
+  });
+  clearTimeout(forceExit);
   process.exit(code);
 }
