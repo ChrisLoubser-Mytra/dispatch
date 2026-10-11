@@ -1,7 +1,6 @@
 ## What's Changed
-* Check Mac updates hourly and preserve cold agent deep links by @selfcontained in https://github.com/selfcontained/dispatch/pull/1233
-* Scroll to the reader's own message after sending from a held position by @selfcontained in https://github.com/selfcontained/dispatch/pull/1234
-* Restore root launch details and refine child launch strips by @selfcontained in https://github.com/selfcontained/dispatch/pull/1235
+* Fix Updates page version and plugin status on the Mac app by @selfcontained in https://github.com/selfcontained/dispatch/pull/1236
+* Sign engine CLIs in from the Dispatch UI by @selfcontained in https://github.com/selfcontained/dispatch/pull/1238
 
 
-**Full Changelog**: https://github.com/selfcontained/dispatch/compare/v1.2.4...v1.2.5
+**Full Changelog**: https://github.com/selfcontained/dispatch/compare/v1.2.5...v1.2.6
