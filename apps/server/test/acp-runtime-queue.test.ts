@@ -151,6 +151,109 @@ describe("AcpRuntime prompt queue", () => {
     ]);
     expect(prompts).toEqual(["one", "two"]);
   });
+
+  it("a prompt that races a turn the engine started itself goes back to the queue", async () => {
+    const stateRoot = mkdtempSync(path.join(os.tmpdir(), "dispatch-queue-"));
+    const dir = path.join(stateRoot, agentId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(hostFile(dir, "pid"), String(process.pid));
+    let seq = 0;
+    const event = (e: unknown): HostMessage =>
+      ({
+        type: "event",
+        seq: ++seq,
+        at: new Date().toISOString(),
+        event: e,
+      }) as HostMessage;
+    const prompts: string[] = [];
+    let socket!: net.Socket;
+    const write = (...messages: HostMessage[]) =>
+      socket.write(messages.map(encodeMessage).join(""));
+    const server = net.createServer((s) => {
+      socket = s;
+      const decode = ndjsonDecoder<ClientMessage>();
+      s.on("data", (chunk) => {
+        for (const message of decode(chunk)) {
+          if (message.type === "hello") {
+            write({
+              type: "welcome",
+              agentId,
+              engine: "claude",
+              sessionId: "sess",
+              resumed: false,
+              running: true,
+              turn: null,
+              journalSeq: seq,
+            } satisfies HostMessage);
+          } else if (message.type === "prompt") {
+            prompts.push(message.text);
+            if (prompts.length === 1) {
+              // The engine's own turn opened just before the prompt arrived.
+              write(
+                event({
+                  type: "turn",
+                  agentId,
+                  state: "started",
+                  text: "",
+                  source: { source: "engine", text: "on its own" },
+                }),
+                { type: "prompt_deferred", id: message.id }
+              );
+            } else {
+              write(
+                event({
+                  type: "turn",
+                  agentId,
+                  state: "started",
+                  text: message.text,
+                }),
+                { type: "prompt_accepted", id: message.id }
+              );
+            }
+          }
+        }
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(hostFile(dir, "socket"), resolve)
+    );
+    cleanup.push(() => {
+      server.close();
+      rmSync(stateRoot, { recursive: true, force: true });
+    });
+    const runtime = createAcpRuntime({
+      config: {
+        agentStateRoot: stateRoot,
+        agentRuntime: "acp",
+        dispatchBinDir: "/nonexistent",
+      },
+      logger,
+      hostSeq: async () => ({ seq: 0, journalId: null }),
+      syncJournal: async () => {},
+    });
+    expect(await runtime.attach(agentId)).toBe(true);
+    const prompt = runtime.prompt(agentId, "next");
+    let accepted = false;
+    let settled = false;
+    void prompt.accepted.then(() => (accepted = true));
+    void prompt.settled.then(() => (settled = true));
+    await new Promise((r) => setTimeout(r, 50));
+    // Handed back, not held: it waits in the runtime's queue, unsent.
+    expect(prompts).toEqual(["next"]);
+    expect(accepted).toBe(false);
+    expect(runtime.isBusy(agentId)).toBe(true);
+    write(
+      event({ type: "turn", agentId, state: "settled", stopReason: "end_turn" })
+    );
+    await prompt.accepted;
+    expect(prompts).toEqual(["next", "next"]);
+    expect(settled).toBe(false);
+    write(
+      event({ type: "turn", agentId, state: "settled", stopReason: "end_turn" })
+    );
+    await prompt.settled;
+    expect(runtime.isBusy(agentId)).toBe(false);
+  });
 });
 
 describe("AcpRuntime legacy host replay", () => {

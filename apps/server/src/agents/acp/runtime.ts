@@ -218,6 +218,8 @@ type Live = {
   /** Keep later prompts behind an outstanding scoped cancellation. */
   deliveryInterrupts: Map<number, Promise<void>>;
   turnOpen: boolean;
+  /** The open turn is one the engine started itself, not a prompt's. */
+  selfStarted: boolean;
   turnBlockIds: Set<string>;
   turnSeq: number | undefined;
   interruptedTurnSeq: number | undefined;
@@ -481,6 +483,39 @@ export function createAcpRuntime(deps: AcpRuntimeDeps): AgentRuntime {
           if (accepted) for (const w of batch) w.resolveSettled();
         };
         entry.settleWaiters.push(onSettle);
+        /** The batch was not consumed: put it back to go out after this turn. */
+        const requeue = async () => {
+          await batch[0]?.onDeferred?.();
+          entry.settleWaiters = entry.settleWaiters.filter(
+            (w) => w !== onSettle
+          );
+          if (batch[0]?.signal?.aborted) {
+            for (const w of batch) {
+              w.rejectAccepted(
+                Object.assign(
+                  new Error("Scheduled delivery cancelled before submission."),
+                  { name: "ScheduledDeliveryCancelledError" }
+                )
+              );
+              w.resolveSettled();
+            }
+            return;
+          }
+          for (const w of batch) {
+            w.taken = false;
+            w.delivery = "queue";
+          }
+          // Keep declined input ahead of ordinary queued work, but behind
+          // interrupts that arrived while the request was pending.
+          const firstOrdinary = entry.waiting.findIndex(
+            (w) => w.delivery !== "interrupt"
+          );
+          entry.waiting.splice(
+            firstOrdinary < 0 ? entry.waiting.length : firstOrdinary,
+            0,
+            ...batch
+          );
+        };
         try {
           if (
             batch.some((w) => w.signal?.aborted) ||
@@ -503,40 +538,9 @@ export function createAcpRuntime(deps: AcpRuntimeDeps): AgentRuntime {
           if (steering) {
             const outcome = await entry.client.steer(id, text, source);
             if (outcome === "promptRequired") {
-              await batch[0]?.onDeferred?.();
               // The engine won the idle race. The message was not consumed;
               // wait for its terminal event, then start an ordinary tracked turn.
-              entry.settleWaiters = entry.settleWaiters.filter(
-                (w) => w !== onSettle
-              );
-              if (batch[0]?.signal?.aborted) {
-                for (const w of batch) {
-                  w.rejectAccepted(
-                    Object.assign(
-                      new Error(
-                        "Scheduled delivery cancelled before submission."
-                      ),
-                      { name: "ScheduledDeliveryCancelledError" }
-                    )
-                  );
-                  w.resolveSettled();
-                }
-                continue;
-              }
-              for (const w of batch) {
-                w.taken = false;
-                w.delivery = "queue";
-              }
-              // Keep declined steering ahead of ordinary queued work, but
-              // behind interrupts that arrived while the request was pending.
-              const firstOrdinary = entry.waiting.findIndex(
-                (w) => w.delivery !== "interrupt"
-              );
-              entry.waiting.splice(
-                firstOrdinary < 0 ? entry.waiting.length : firstOrdinary,
-                0,
-                ...batch
-              );
+              await requeue();
               continue;
             }
           } else {
@@ -545,12 +549,18 @@ export function createAcpRuntime(deps: AcpRuntimeDeps): AgentRuntime {
             entry.turnBlockIds = new Set(sourceBlockIds(source));
             entry.conversation = source?.conversation;
             const images = batch.flatMap((item) => item.images ?? []);
-            await entry.client.prompt(
+            const outcome = await entry.client.prompt(
               id,
               text,
               source,
               images.length ? images : undefined
             );
+            if (outcome === "deferred") {
+              // The engine started a turn of its own first. The prompt waits
+              // here, still deletable and interruptible, until that settles.
+              await requeue();
+              continue;
+            }
           }
           if (steering && !ended) {
             for (const blockId of sourceBlockIds(source))
@@ -591,11 +601,17 @@ export function createAcpRuntime(deps: AcpRuntimeDeps): AgentRuntime {
       entry.conversation =
         event.state === "started" ? event.source?.conversation : undefined;
       if (event.state === "settled") {
-        const waiters = entry.settleWaiters;
-        entry.settleWaiters = [];
-        for (const resolve of waiters) resolve();
+        // A turn the engine started itself settles no prompt: one submitted
+        // meanwhile waits behind it and settles with its own turn.
+        if (!entry.selfStarted) {
+          const waiters = entry.settleWaiters;
+          entry.settleWaiters = [];
+          for (const resolve of waiters) resolve();
+        }
         void pump(agentId, entry);
       }
+      entry.selfStarted =
+        event.state === "started" && event.source?.source === "engine";
     }
     if (
       event.type === "update" &&
@@ -641,6 +657,7 @@ export function createAcpRuntime(deps: AcpRuntimeDeps): AgentRuntime {
       pending: 0,
       deliveryInterrupts: new Map(),
       turnOpen: false,
+      selfStarted: false,
       turnBlockIds: new Set(),
       turnSeq: undefined,
       interruptedTurnSeq: undefined,
@@ -695,6 +712,7 @@ export function createAcpRuntime(deps: AcpRuntimeDeps): AgentRuntime {
           );
         }
         entry.turnOpen = welcome.turn !== null;
+        entry.selfStarted = welcome.turn?.source?.source === "engine";
         entry.turnSeq = welcome.turn?.seq;
         entry.turnBlockIds = new Set(sourceBlockIds(welcome.turn?.source));
         entry.conversation = welcome.turn?.source?.conversation;

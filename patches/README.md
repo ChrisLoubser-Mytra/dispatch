@@ -64,3 +64,19 @@ text, replay, recipient isolation, and retry invalidation.
 Remove these receipt hunks when upstream provides equivalent correlated runtime
 pickup notifications, and translate those notifications at the driver boundary.
 Keep the Codex fallback hunks until its separate upstream fix is included.
+
+## Codex turn boundaries
+
+Codex can start turns of its own between prompts (a goal continuation), and
+codex-acp maps app-server `turn/started` / `turn/completed` to no ACP update,
+so a client cannot tell where such a turn begins or ends. The patch forwards
+both as a `session_info_update` carrying
+`_meta["dispatch/turn"] = { state: "started" | "completed", turnId, status?, error? }`.
+A prompt's response also carries `_meta["dispatch/turn"] = { turnId }`, the
+turn it ran as, so ownership never depends on marker order (a goal
+continuation can start just before the prompt's own turn). Once the prompt
+settles, the driver opens a self-started turn for any other turn that started
+during it and is still running; while idle, a `started` opens one, and the
+matching `completed` settles it. Claude needs no patch:
+claude-agent-acp tags an autonomous cycle's final `usage_update` with
+`_meta["_claude/origin"]`.
