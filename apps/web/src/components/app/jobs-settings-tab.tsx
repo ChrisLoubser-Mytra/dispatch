@@ -1,3 +1,11 @@
+import { useProjects } from "@/hooks/use-projects";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -41,6 +49,21 @@ export function SettingsTab({
   isUpdating: boolean;
   isRemoving: boolean;
 }) {
+  const { data: projects = [], isSuccess: projectsLoaded } = useProjects();
+  const [membershipEdit, setMembershipEdit] = useState<{
+    id: string;
+    value: string | null;
+  } | null>(null);
+  const hasMembershipEdit =
+    membershipEdit?.id === job.id &&
+    (membershipEdit.value === null ||
+      !projectsLoaded ||
+      projects.some((p) => p.id === membershipEdit.value));
+  const projectId = hasMembershipEdit
+    ? membershipEdit!.value
+    : (job.projectId ?? null);
+  const membershipChanged =
+    hasMembershipEdit && projectId !== (job.projectId ?? null);
   const [displayName, setDisplayName] = useState(job.name);
   const [schedule, setSchedule] = useState(job.schedule ?? "");
   const [timeoutMinutes, setTimeoutMinutes] = useState(
@@ -91,6 +114,7 @@ export function SettingsTab({
   // (updatedAt, lastRun*, nextRun) which would otherwise clobber unsaved edits.
   useEffect(() => {
     setDisplayName(job.name);
+    setMembershipEdit(null);
     setSchedule(job.schedule ?? "");
     setTimeoutMinutes(minutesFromMs(job.timeoutMs));
     setNeedsInputTimeoutMinutes(minutesFromMs(job.needsInputTimeoutMs));
@@ -116,6 +140,27 @@ export function SettingsTab({
 
   return (
     <div className="mt-4 grid gap-4">
+      <label className="space-y-1 text-sm">
+        Project (via template)
+        <Select
+          value={projectId ?? "none"}
+          onValueChange={(v) =>
+            setMembershipEdit({ id: job.id, value: v === "none" ? null : v })
+          }
+        >
+          <SelectTrigger aria-label="Project membership">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="none">No project</SelectItem>
+            {projects.map((p) => (
+              <SelectItem key={p.id} value={p.id}>
+                {p.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </label>
       <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 bg-muted/20 px-3 py-3 text-sm">
         <span>
           <span className="block font-medium text-foreground">Enabled</span>
@@ -344,6 +389,7 @@ export function SettingsTab({
                 name: job.name,
                 directory: job.directory,
                 displayName,
+                ...(membershipChanged ? { projectId } : {}),
                 schedule: schedule.trim() || null,
                 timeoutMs: msFromMinutes(timeoutMinutes),
                 needsInputTimeoutMs: msFromMinutes(needsInputTimeoutMinutes),
@@ -360,6 +406,7 @@ export function SettingsTab({
                 webhookEnabled,
               })
                 .then(() => {
+                  setMembershipEdit(null);
                   setSaved(true);
                 })
                 .catch((error) => {

@@ -356,6 +356,7 @@ export function useSSE(authState: AuthState): void {
           // state forever (the query has staleTime: Infinity).
           void queryClient.invalidateQueries({ queryKey: ["jobs"] });
           void queryClient.invalidateQueries({ queryKey: ["templates"] });
+          void queryClient.invalidateQueries({ queryKey: ["projects"] });
           void queryClient.invalidateQueries({ queryKey: ["brain"] });
           void queryClient.invalidateQueries({ queryKey: ["agent-models"] });
           void queryClient.invalidateQueries({ queryKey: ["agent-identity"] });
@@ -541,7 +542,12 @@ export function useSSE(authState: AuthState): void {
           return;
         }
 
+        if (payload.type === "project.changed") {
+          for (const key of ["projects", "agents", "templates", "jobs"])
+            void queryClient.invalidateQueries({ queryKey: [key] });
+        }
         if (payload.type === "template.changed") {
+          void queryClient.invalidateQueries({ queryKey: ["jobs"] });
           void queryClient.invalidateQueries({ queryKey: ["templates"] });
           return;
         }

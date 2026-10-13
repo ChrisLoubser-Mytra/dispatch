@@ -33,6 +33,7 @@ export type JobRunStatus =
 export type JobAgentType = CliAgentType;
 
 export type JobRecord = {
+  projectId?: string | null;
   id: string;
   directory: string;
   name: string;
@@ -139,6 +140,7 @@ export type JobRunConfig = {
 };
 
 export type AddJobInput = {
+  projectId?: string | null;
   name: string;
   directory: string;
   displayName?: string;
@@ -547,7 +549,8 @@ export class JobStore {
     const result = await this.pool.query(
       `
       UPDATE job_runs
-      SET agent_id = $2, status = 'running', status_updated_at = NOW()
+      SET agent_id = $2, status = 'running', status_updated_at = NOW(),
+          config = config || jsonb_build_object('directory', COALESCE((SELECT cwd FROM agents WHERE id=$2), config->>'directory'))
       WHERE id = $1 AND agent_id IS NULL
       RETURNING ${this.runColumns()}
       `,
@@ -791,6 +794,7 @@ export class JobStore {
         j.webhook_enabled AS "webhookEnabled",
         j.webhook_secret AS "webhookSecret",
         j.template_id AS "templateId",
+        (SELECT project_id FROM templates WHERE id=j.template_id) AS "projectId",
         j.default_args AS "defaultArgs",
         j.self_improve AS "selfImprove",
         j.continuation_enabled AS "continuationEnabled",
@@ -970,7 +974,11 @@ export class JobStore {
 
   async updateJobConfig(
     jobId: string,
-    input: JobConfigUpdate
+    input: JobConfigUpdate,
+    updateRelated?: (
+      client: import("pg").PoolClient,
+      job: JobRecord
+    ) => Promise<void>
   ): Promise<JobRecord> {
     const client = await this.pool.connect();
     try {
@@ -1051,6 +1059,7 @@ export class JobStore {
       if (!result.rows[0]) throw new Error(`Job ${jobId} not found.`);
       const updated = mapJob(result.rows[0]);
       await this.clearDisabledContinuationBarriers(client, updated);
+      await updateRelated?.(client, updated);
       await client.query("COMMIT");
       return updated;
     } catch (error) {

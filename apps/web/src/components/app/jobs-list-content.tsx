@@ -1,3 +1,5 @@
+import { ProjectSwitcher } from "./project-switcher";
+import { useProjectScope } from "@/hooks/use-projects";
 import { Activity, AlarmClock, Clock } from "lucide-react";
 
 import { useJobsContext } from "@/components/app/jobs-context";
@@ -17,7 +19,7 @@ export function JobListContent({
   hideHeader?: boolean;
 }): JSX.Element {
   const {
-    jobs,
+    jobs: allJobs,
     isLoading,
     error,
     selectedJob,
@@ -28,10 +30,17 @@ export function JobListContent({
     navigate,
   } = useJobsContext();
 
+  const { projectId } = useProjectScope();
+  const jobs = projectId
+    ? allJobs.filter((j) => j.projectId === projectId)
+    : allJobs;
   return (
     <div data-testid="jobs-sidebar" className="flex min-h-0 flex-1 flex-col">
       {hideHeader ? (
-        <div className="flex items-center justify-end px-3 py-2">
+        <div className="flex items-center gap-2 px-3 py-2">
+          <div className="min-w-0 flex-1">
+            <ProjectSwitcher />
+          </div>
           <Button
             size="sm"
             variant="default"
@@ -45,9 +54,9 @@ export function JobListContent({
         </div>
       ) : (
         <div className="mt-2 flex h-14 items-center border-b border-border px-3">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-            Jobs
-          </h2>
+          <div className="mr-2 min-w-0 flex-1">
+            <ProjectSwitcher />
+          </div>
           <div className="ml-auto flex items-center">
             <Button
               size="sm"

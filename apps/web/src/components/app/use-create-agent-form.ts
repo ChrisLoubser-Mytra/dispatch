@@ -32,6 +32,7 @@ type UseCreateAgentFormOptions = {
   enabledAgentTypes: AgentType[];
   initialAgentType: AgentType | null;
   resolveDefaultCwd: () => string;
+  initialProjectId?: string | null;
   onCreated: (agent: Agent, agentType: AgentType) => Promise<void>;
 };
 
@@ -47,8 +48,12 @@ export function useCreateAgentForm({
   enabledAgentTypes,
   initialAgentType,
   resolveDefaultCwd,
+  initialProjectId,
   onCreated,
 }: UseCreateAgentFormOptions) {
+  const [createProjectId, setCreateProjectId] = useState(
+    initialProjectId ?? null
+  );
   const [step, setStep] = useState<"config" | "context">("config");
   const promptTextareaRef = useRef<HTMLTextAreaElement>(null);
   const [createName, setCreateName] = useState("");
@@ -168,6 +173,21 @@ export function useCreateAgentForm({
     [createCwd]
   );
 
+  useEffect(() => {
+    if (!createProjectId) return;
+    const controller = new AbortController();
+    void api<CwdPathInfo>(
+      `/api/v1/system/path-info?path=${encodeURIComponent(createCwd.trim())}`,
+      { signal: controller.signal }
+    )
+      .then((info) => {
+        if (!controller.signal.aborted) handlePathInfoChange(info);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) handlePathInfoChange(null);
+      });
+    return () => controller.abort();
+  }, [createProjectId, createCwd, handlePathInfoChange]);
   const currentCwd = createCwd.trim();
   const worktreeAvailable =
     validatedCwd?.cwd === currentCwd && validatedCwd.isGitRepo;
@@ -226,7 +246,8 @@ export function useCreateAgentForm({
           step === "context" ? initialPrompt.trim() || undefined : undefined;
         const payloadBase = {
           name: createName.trim(),
-          cwd,
+          cwd: createProjectId ? undefined : cwd,
+          projectId: createProjectId ?? undefined,
           type: createType,
           persona: createPersona ?? undefined,
           model: modelOptions.some((option) => option.id === createModel)
@@ -291,6 +312,7 @@ export function useCreateAgentForm({
     [
       createBaseBranch,
       createCwd,
+      createProjectId,
       createFullAccess,
       createName,
       createModel,
@@ -310,6 +332,8 @@ export function useCreateAgentForm({
   );
 
   return {
+    createProjectId,
+    setCreateProjectId,
     step,
     setStep,
     promptTextareaRef,

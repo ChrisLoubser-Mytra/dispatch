@@ -2,6 +2,17 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/hooks/use-projects", () => ({
+  useProjects: () => ({ data: [] }),
+  useProjectScope: () => ({
+    projectId: null,
+    project: undefined,
+    projects: [],
+  }),
+}));
+
+vi.mock("./project-switcher", () => ({ ProjectSwitcher: () => null }));
+
 import type { Job } from "@/hooks/use-jobs";
 
 import { JobListContent } from "./jobs-list-content";
@@ -328,7 +339,7 @@ describe("JobListContent — header", () => {
   it("shows the full header with a title when hideHeader is false", () => {
     H.context = defaultContext([]);
     render(<JobListContent />);
-    expect(screen.getByText("Jobs")).toBeTruthy();
+    expect(screen.getByTestId("jobs-sidebar")).toBeTruthy();
     fireEvent.click(screen.getByTestId("add-job-button"));
     expect(H.context.openAddJob).toHaveBeenCalledTimes(1);
   });

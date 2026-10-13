@@ -1,3 +1,4 @@
+import { ProjectStore } from "../projects/store.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
@@ -92,7 +93,7 @@ export class JobService {
   private stopping = false;
 
   constructor(
-    pool: Pool,
+    private readonly pool: Pool,
     private readonly agentManager: AgentManager,
     private readonly logger: FastifyBaseLogger,
     private readonly config: AppConfig,
@@ -175,7 +176,7 @@ export class JobService {
     let run = await this.store.createRun(
       job.id,
       buildRunConfig(
-        job,
+        { ...job, directory: template?.directory ?? job.directory },
         input.triggerSource ?? "manual",
         input.chainId ?? (job.continuationEnabled ? randomUUID() : undefined),
         input.iteration ?? (job.continuationEnabled ? 1 : undefined),
@@ -199,7 +200,7 @@ export class JobService {
           type: agentType,
           model: agentConfig.model ?? undefined,
           persona: agentConfig.persona ?? undefined,
-          cwd: job.directory,
+          cwd: template?.directory ?? job.directory,
           agentArgs: buildAgentArgs(agentType, prompt, agentConfig.fullAccess),
           // The CLI receives generated job-run scaffolding through agentArgs;
           // Chat shows only the user-authored job prompt.
@@ -207,6 +208,7 @@ export class JobService {
           fullAccess: agentConfig.fullAccess,
           ...templateWorktreeConfig(agentConfig),
           jobRunId: run.id,
+          templateId: job.templateId ?? undefined,
         },
         {
           beforeLaunch: async (agentId) => {
@@ -475,7 +477,7 @@ export class JobService {
         type: agentConfig.agentType as JobAgentType,
         model: agentConfig.model ?? undefined,
         persona: agentConfig.persona ?? undefined,
-        cwd: job.directory,
+        cwd: template?.directory ?? job.directory,
         agentArgs: buildAgentArgs(
           agentConfig.agentType as JobAgentType,
           prompt,
@@ -485,10 +487,26 @@ export class JobService {
         fullAccess: agentConfig.fullAccess,
         ...templateWorktreeConfig(agentConfig),
         jobRunId: run.id,
+        templateId: job.templateId ?? undefined,
       },
       {
         beforeLaunch: async (agentId) => {
           const attached = await this.store.attachAgent(run.id, agentId);
+          // Moving a job never rewrites the previous run's repository. Copy its
+          // compact handoff into the successor's repository before it starts.
+          if (run.config.continuationOfRunId) {
+            const previous = await this.store.getRun(
+              run.config.continuationOfRunId
+            );
+            if (
+              previous &&
+              previous.config.directory !== attached.config.directory
+            )
+              await this.syncContinuationHandoff(
+                previous,
+                attached.config.directory
+              );
+          }
           this.emitRunStateChange(attached);
         },
       }
@@ -505,17 +523,21 @@ export class JobService {
     };
   }
 
-  private async syncContinuationHandoff(run: JobRunRecord): Promise<void> {
+  private async syncContinuationHandoff(
+    run: JobRunRecord,
+    destinationDirectory?: string
+  ): Promise<void> {
     if (!this.brainStore || !run.agentId) return;
     const job = await this.store.getJob(run.jobId);
     if (!job?.continuationEnabled) return;
+    const directory = destinationDirectory ?? run.config.directory;
     let repoRoot: string;
     try {
-      repoRoot = await resolveRepoRoot(job.directory);
+      repoRoot = await resolveRepoRoot(directory);
     } catch {
       // Brain is scoped by a stable repository root when possible; plain
       // directories are still valid job targets and use their normalized path.
-      repoRoot = normalizePath(job.directory);
+      repoRoot = normalizePath(directory);
     }
     const key = continuationBrainKey(job.id);
     const terminalStatus =
@@ -619,6 +641,11 @@ export class JobService {
       continuationEnabled: input.continuationEnabled,
     });
 
+    if (input.projectId) {
+      const project = await new ProjectStore(this.pool).get(input.projectId);
+      if (!project) throw new Error("Project not found.");
+      input = { ...input, directory: project.repoRoot };
+    }
     if (input.persona)
       await resolveLaunchPersona(
         input.directory,
@@ -632,6 +659,7 @@ export class JobService {
     // If job creation fails, clean up the template to avoid orphans.
     const template = await this.templateStore.createTemplate({
       name: displayName,
+      projectId: input.projectId ?? null,
       directory: input.directory,
       description: null,
       prompt: input.prompt ?? null,
@@ -713,6 +741,15 @@ export class JobService {
       );
     }
 
+    let projectDirectory: string | undefined;
+    if (input.projectId !== undefined) {
+      const project = input.projectId
+        ? await new ProjectStore(this.pool).get(input.projectId)
+        : null;
+      if (input.projectId && !project) throw new Error("Project not found.");
+      if (!existing.templateId) throw new Error("Job has no backing template.");
+      projectDirectory = project?.repoRoot;
+    }
     const schedule = input.schedule === "" ? null : input.schedule;
     const nextSchedule =
       input.schedule === undefined ? existing.schedule : schedule;
@@ -798,45 +835,47 @@ export class JobService {
     if (input.recoveryInstructions !== undefined)
       config.recoveryInstructions = input.recoveryInstructions;
 
-    const updated = await this.store.updateJobConfig(existing.id, config);
+    // Commit the backing template and job row together. Scheduler changes are
+    // only applied once both writes succeed.
+    const updated = await this.store.updateJobConfig(
+      existing.id,
+      config,
+      async (client, updated) => {
+        if (!updated.templateId) return;
+        const templateUpdates: Record<string, unknown> = {};
+        if (input.projectId !== undefined) {
+          templateUpdates.projectId = input.projectId;
+          if (projectDirectory) templateUpdates.directory = projectDirectory;
+        }
+        if (input.persona !== undefined)
+          templateUpdates.persona = input.persona;
+        if (input.prompt !== undefined) templateUpdates.prompt = input.prompt;
+        if (input.agentType !== undefined)
+          templateUpdates.agentType = input.agentType;
+        if (config.model !== undefined) templateUpdates.model = config.model;
+        if (input.useWorktree !== undefined)
+          templateUpdates.useWorktree = input.useWorktree;
+        if (input.baseBranch !== undefined)
+          templateUpdates.baseBranch = input.baseBranch;
+        if (input.branchName !== undefined)
+          templateUpdates.branchName = input.branchName;
+        if (input.fullAccess !== undefined)
+          templateUpdates.fullAccess = input.fullAccess;
+        if (input.selfImprove !== undefined)
+          templateUpdates.selfImprove = input.selfImprove;
+        if (displayName !== undefined && displayName !== existing.name) {
+          templateUpdates.name = displayName;
+        }
+        if (Object.keys(templateUpdates).length > 0) {
+          await new TemplateStore(client).updateTemplate(
+            updated.templateId,
+            templateUpdates
+          );
+        }
+      }
+    );
     if (!updated.enabled || !updated.continuationEnabled)
       this.clearBrainRetriesForJob(updated.id);
-
-    // Propagate agent-config changes to the backing template
-    if (updated.templateId) {
-      const templateUpdates: Record<string, unknown> = {};
-      if (input.persona !== undefined) templateUpdates.persona = input.persona;
-      if (input.prompt !== undefined) templateUpdates.prompt = input.prompt;
-      if (input.agentType !== undefined)
-        templateUpdates.agentType = input.agentType;
-      if (config.model !== undefined) templateUpdates.model = config.model;
-      if (input.useWorktree !== undefined)
-        templateUpdates.useWorktree = input.useWorktree;
-      if (input.baseBranch !== undefined)
-        templateUpdates.baseBranch = input.baseBranch;
-      if (input.branchName !== undefined)
-        templateUpdates.branchName = input.branchName;
-      if (input.fullAccess !== undefined)
-        templateUpdates.fullAccess = input.fullAccess;
-      if (input.selfImprove !== undefined)
-        templateUpdates.selfImprove = input.selfImprove;
-      if (displayName !== undefined && displayName !== existing.name) {
-        templateUpdates.name = displayName;
-      }
-      if (Object.keys(templateUpdates).length > 0) {
-        await this.templateStore
-          .updateTemplate(
-            updated.templateId,
-            templateUpdates as Parameters<TemplateStore["updateTemplate"]>[1]
-          )
-          .catch((err) => {
-            this.logger.warn(
-              { err, templateId: updated.templateId },
-              "Failed to propagate update to backing template"
-            );
-          });
-      }
-    }
 
     if (updated.enabled && updated.schedule) {
       this.scheduleJob(updated);

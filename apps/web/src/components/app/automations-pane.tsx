@@ -1,5 +1,8 @@
+import { ProjectSwitcher } from "./project-switcher";
+import { useProjectScope } from "@/hooks/use-projects";
+import { useProjectNavigate } from "@/hooks/use-projects";
 import { useCallback, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { useLocation, useParams } from "react-router-dom";
 import { AlarmClock, Brain, FormInput, Play } from "lucide-react";
 import { motion } from "framer-motion";
 
@@ -130,14 +133,21 @@ function TemplateListContent({
   enabledAgentTypes: AgentType[];
   onItemSelect?: () => void;
 }): JSX.Element {
-  const navigate = useNavigate();
+  const navigate = useProjectNavigate();
   const { templateId } = useParams<{ templateId?: string }>();
-  const { data: templates = [], isLoading } = useTemplates();
+  const { projectId } = useProjectScope();
+  const { data: allTemplates = [], isLoading } = useTemplates();
+  const templates = projectId
+    ? allTemplates.filter((t) => t.projectId === projectId)
+    : allTemplates;
   const [showCreate, setShowCreate] = useState(false);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-end px-3 py-2">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <div className="min-w-0 flex-1">
+          <ProjectSwitcher />
+        </div>
         <Button
           size="sm"
           variant="default"
@@ -285,7 +295,7 @@ export function AutomationsSidebarContent({
   isMobile: boolean;
   closeSidebar?: () => void;
 }): JSX.Element {
-  const navigate = useNavigate();
+  const navigate = useProjectNavigate();
   const location = useLocation();
   const activeTab = resolveTab(location.pathname);
 
@@ -304,7 +314,9 @@ export function AutomationsSidebarContent({
 
   const openAgent = useCallback(
     async (agent: Agent) => {
-      navigate(agentRoute(agent.id));
+      navigate(
+        `${agentRoute(agent.id)}?project=${encodeURIComponent(agent.projectId ?? "")}`
+      );
     },
     [navigate]
   );
@@ -341,13 +353,15 @@ export function AutomationsDetailContent({
   agents: Agent[];
   enabledAgentTypes: AgentType[];
 }): JSX.Element {
-  const navigate = useNavigate();
+  const navigate = useProjectNavigate();
   const location = useLocation();
   const activeTab = resolveTab(location.pathname);
 
   const openAgent = useCallback(
     async (agent: Agent) => {
-      navigate(agentRoute(agent.id));
+      navigate(
+        `${agentRoute(agent.id)}?project=${encodeURIComponent(agent.projectId ?? "")}`
+      );
     },
     [navigate]
   );

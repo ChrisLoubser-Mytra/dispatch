@@ -1,3 +1,5 @@
+import { ProjectLocation } from "./project-location";
+import { useProjectScope } from "@/hooks/use-projects";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { ChevronDown, X } from "lucide-react";
 import { useState } from "react";
@@ -86,7 +88,11 @@ export function AddJobFlow({
   enabledAgentTypes: AgentType[];
 }) {
   const [displayName, setDisplayName] = useState("");
-  const [directory, setDirectory] = useState("");
+  const { project } = useProjectScope();
+  const [projectId, setProjectId] = useState<string | null>(
+    project?.id ?? null
+  );
+  const [directory, setDirectory] = useState(project?.repoRoot ?? "");
   const [prompt, setPrompt] = useState("");
   const [schedule, setSchedule] = useState("");
   const [timeoutMinutes, setTimeoutMinutes] = useState("30");
@@ -163,24 +169,26 @@ export function AddJobFlow({
                 />
               </div>
               <div className="min-w-0 space-y-1 md:col-span-2">
-                <label
-                  className="text-sm text-muted-foreground"
-                  htmlFor="job-directory"
+                <ProjectLocation
+                  projectId={projectId}
+                  onChange={(p) => {
+                    setProjectId(p?.id ?? null);
+                    if (p) setDirectory(p.repoRoot);
+                  }}
                 >
-                  Working directory
-                </label>
-                <PathInput
-                  value={directory}
-                  onChange={setDirectory}
-                  label=""
-                  placeholder="~/code/project"
-                  id="job-directory"
-                  history={cwdHistory}
-                  removableHistory={removableCwdHistory}
-                  historyMetadata={cwdHistoryMetadata}
-                  onRemoveHistory={removeCwdHistory}
-                  data-testid="job-directory-input"
-                />
+                  <PathInput
+                    value={directory}
+                    onChange={setDirectory}
+                    label=""
+                    placeholder="~/code/project"
+                    id="job-directory"
+                    history={cwdHistory}
+                    removableHistory={removableCwdHistory}
+                    historyMetadata={cwdHistoryMetadata}
+                    onRemoveHistory={removeCwdHistory}
+                    data-testid="job-directory-input"
+                  />
+                </ProjectLocation>
               </div>
               <AgentPersonaSelect
                 cwd={directory}
@@ -416,6 +424,7 @@ export function AddJobFlow({
             void onAddJob({
               name: displayName.trim(),
               directory: trimmedDirectory,
+              projectId,
               displayName: displayName.trim(),
               prompt: prompt.trim(),
               schedule: schedule.trim() || null,

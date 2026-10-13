@@ -703,6 +703,7 @@ describe("useSSE message handling", () => {
       ["agent-turn-label"],
       ["jobs"],
       ["templates"],
+      ["projects"],
       ["brain"],
       ["agent-models"],
       ["agent-identity"],
@@ -1147,9 +1148,21 @@ describe("useSSE message handling", () => {
     expect(invalidatedKeys(invalidateQueries)).toEqual([
       ["jobs"],
       ["agents"],
+      ["jobs"],
       ["templates"],
       ["brain"],
       ["agent-models"],
+    ]);
+  });
+
+  it("invalidates project membership collections when a project changes", () => {
+    const { emit, invalidateQueries } = renderMessages();
+    emit({ type: "project.changed" });
+    expect(invalidatedKeys(invalidateQueries)).toEqual([
+      ["projects"],
+      ["agents"],
+      ["templates"],
+      ["jobs"],
     ]);
   });
 

@@ -177,6 +177,7 @@ type CreateAgentInput = {
   };
   initialFiles?: SeedFileInput[];
   templateId?: string;
+  projectId?: string | null;
 };
 
 type StopAgentInput = {
@@ -1207,6 +1208,26 @@ export class AgentManager {
     }
   }
 
+  async setProject(id: string, projectId: string | null): Promise<AgentRecord> {
+    await this.getRequiredAgent(id);
+    if (
+      projectId &&
+      !(
+        await this.pool.query("SELECT id FROM projects WHERE id=$1", [
+          projectId,
+        ])
+      ).rowCount
+    )
+      throw new AgentError("Project not found.", 404);
+    await this.pool.query(
+      "UPDATE agents SET project_id=$2, updated_at=now() WHERE id=$1",
+      [id, projectId]
+    );
+    const agent = await this.getRequiredAgent(id);
+    this.eventBus.publish(agent);
+    return agent;
+  }
+
   /**
    * Point the agent's workspace at the directory it now works in, or back at
    * its launch worktree/cwd with `path: null`. Everything that reads its
@@ -1254,6 +1275,37 @@ export class AgentManager {
       beforeLaunch?: (agentId: string) => Promise<void>;
     } = {}
   ): Promise<AgentRecord> {
+    input = { ...input };
+    if (input.templateId) {
+      const template = (
+        await this.pool.query("SELECT project_id FROM templates WHERE id=$1", [
+          input.templateId,
+        ])
+      ).rows[0];
+      if (!template) throw new AgentError("Template not found.", 404);
+      if (!input.parentAgentId) {
+        if (
+          input.projectId !== undefined &&
+          input.projectId !== template.project_id
+        )
+          throw new AgentError("Template and project must match.", 400);
+        input.projectId = template.project_id;
+      }
+    }
+    if (input.parentAgentId) {
+      input.projectId =
+        (await this.getAgent(input.parentAgentId))?.projectId ?? null;
+    }
+    if (input.projectId) {
+      const project = (
+        await this.pool.query("SELECT repo_root FROM projects WHERE id=$1", [
+          input.projectId,
+        ])
+      ).rows[0];
+      if (!project) throw new AgentError("Project not found.", 404);
+      // A child can use its parent's worktree while retaining explicit membership.
+      if (!input.parentAgentId) input.cwd = project.repo_root;
+    }
     const taskPersona = Boolean(input.persona && input.role !== "review");
     if (taskPersona && !options.detachLaunch) {
       const persona = await resolveLaunchPersona(
@@ -1628,8 +1680,8 @@ export class AgentManager {
   ): Promise<void> {
     await this.pool.query(
       `
-      INSERT INTO agents (id, name, type, role, status, cwd, launch_cwd, files_dir, agent_args, model, full_access, setup_phase, persona, parent_agent_id, launched_by_agent_id, persona_context, review_agent_type, cli_session_id, base_branch, template_id, updated_at)
-      VALUES ($1, $2, $3, $4, 'creating', $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
+      INSERT INTO agents (id, name, type, role, status, cwd, launch_cwd, files_dir, agent_args, model, full_access, setup_phase, persona, parent_agent_id, launched_by_agent_id, persona_context, review_agent_type, cli_session_id, base_branch, template_id, project_id, updated_at)
+      VALUES ($1, $2, $3, $4, 'creating', $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, NOW())
       `,
       [
         p.id,
@@ -1651,6 +1703,7 @@ export class AgentManager {
         p.cliSessionId,
         p.normalizedBaseBranch ?? null,
         input.templateId ?? null,
+        input.projectId ?? null,
       ]
     );
   }
@@ -2295,6 +2348,7 @@ export class AgentManager {
         review_agent_type AS "reviewAgentType",
         base_branch AS "baseBranch",
         template_id AS "templateId",
+        project_id AS "projectId",
         (
           SELECT json_build_object(
             'continuationEnabled',
