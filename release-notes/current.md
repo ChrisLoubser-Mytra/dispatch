@@ -1,5 +1,5 @@
 ## What's Changed
-* Add task personas for agent launches, templates, and jobs by @selfcontained in https://github.com/selfcontained/dispatch/pull/1239
+* Cache default-branch personas across worktrees by @selfcontained in https://github.com/selfcontained/dispatch/pull/1240
 
 
-**Full Changelog**: https://github.com/selfcontained/dispatch/compare/v1.2.7...v1.3.0
+**Full Changelog**: https://github.com/selfcontained/dispatch/compare/v1.3.0...v1.3.1
