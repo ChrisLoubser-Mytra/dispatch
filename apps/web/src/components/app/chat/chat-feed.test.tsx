@@ -600,26 +600,149 @@ describe("ChatFeed", () => {
     }),
   };
 
-  it("renders a static launch event without startup controls or reactions", () => {
-    renderFeed(
-      [
+  it.each(["running", "done", "failed"] as const)(
+    "keeps child %s startup out of the launch strip",
+    (status) => {
+      renderFeed([
         blockEntry(
           launchBlock({
-            id: "l1",
             toAgentId: "agt_child",
-            launchedByAgentId: AGENT_ID,
-            launchState: { startup: { steps: [steps.worktree()] } },
+            launchState: {
+              startup: {
+                steps: [{ ...steps.worktree(), status }],
+                ...(status === "failed" ? { failed: "Failed setup" } : {}),
+              },
+            },
           })
         ),
-      ],
-      {},
-      { onToggleReaction: vi.fn() }
+      ]);
+      const event = screen.getByTestId("chat-compact-launch");
+      expect(event.textContent).toContain("Launched");
+      expect(event.textContent).not.toContain("Launching");
+      expect(screen.queryByTestId("chat-launch-startup")).toBeNull();
+    }
+  );
+
+  it.each(["running", "completed", "warning", "failed", "empty failure"])(
+    "uses shared expandable root activity for %s startup",
+    (state) => {
+      const failed = state.includes("failure") || state === "failed";
+      renderFeed([
+        blockEntry(
+          launchBlock({
+            toAgentId: AGENT_ID,
+            streamId: AGENT_ID,
+            text: "Root briefing",
+            launchState: {
+              instructions: "Root instructions",
+              startup: {
+                steps:
+                  state === "empty failure"
+                    ? []
+                    : [
+                        {
+                          ...steps.worktree(),
+                          status:
+                            state === "running"
+                              ? "running"
+                              : state === "warning" || failed
+                                ? "failed"
+                                : "done",
+                          detail: "Workspace preparation detail",
+                        },
+                      ],
+                ...(state === "completed" || state === "warning"
+                  ? { readyAt: "2026-09-02T10:00:10.000Z" }
+                  : {}),
+                ...(failed ? { failed: "Persona preparation failed" } : {}),
+              },
+            },
+          })
+        ),
+      ]);
+      const root = screen.getByTestId("chat-launch-card");
+      const progress = within(root).getByTestId("chat-launch-startup");
+      const summary = within(progress).getByTestId("harness-activity-summary");
+      expect(summary.getAttribute("aria-expanded")).toBe("false");
+      expect(within(progress).queryByRole("list")).toBeNull();
+      expect(summary.textContent).toContain(
+        failed
+          ? "failed"
+          : state === "warning"
+            ? "Started with warnings"
+            : state === "completed"
+              ? "Started"
+              : "creating git worktree"
+      );
+      if (failed)
+        expect(progress.textContent).toContain("Persona preparation failed");
+      fireEvent.click(summary);
+      expect(summary.getAttribute("aria-expanded")).toBe("true");
+      expect(
+        within(progress).getByRole("list", { name: "activity steps" })
+      ).toBeTruthy();
+      if (state !== "empty failure") {
+        expect(
+          within(progress).getByTestId("harness-step").textContent
+        ).toContain("creating git worktree");
+        if (state !== "running")
+          expect(progress.textContent).toContain(
+            "Workspace preparation detail"
+          );
+      }
+      fireEvent.click(summary);
+      expect(summary.getAttribute("aria-expanded")).toBe("false");
+      expect(root.textContent).toContain("Root briefing");
+      expect(root.textContent).toContain("Instructions");
+    }
+  );
+
+  it("unfolds the full nonfatal startup diagnostic using shared step details", () => {
+    const diagnostic = `npm install failed; continuing launch.\n${"Long diagnostic line with workspace and subprocess context. ".repeat(8)}\nError tail: missing package registry credentials.`;
+    renderFeed([
+      blockEntry(
+        launchBlock({
+          streamId: AGENT_ID,
+          toAgentId: AGENT_ID,
+          launchState: {
+            startup: {
+              readyAt: "2026-09-02T10:00:10.000Z",
+              steps: [
+                {
+                  ...steps.worktree("failed"),
+                  phase: "deps",
+                  label: "Installing dependencies",
+                  detail: diagnostic,
+                },
+              ],
+            },
+          },
+        })
+      ),
+    ]);
+    const progress = screen.getByTestId("chat-launch-startup");
+    const summary = within(progress).getByTestId("harness-activity-summary");
+    fireEvent.click(summary);
+    const step = within(progress).getByRole("button", {
+      name: "installing dependencies, failed",
+    });
+    expect(step.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(step);
+    expect(step.getAttribute("aria-expanded")).toBe("true");
+    expect(progress.querySelector("pre")?.textContent).toBe(diagnostic);
+    fireEvent.click(summary);
+    fireEvent.click(summary);
+    expect(
+      within(progress)
+        .getByRole("button", { name: "installing dependencies, failed" })
+        .getAttribute("aria-expanded")
+    ).toBe("true");
+    fireEvent.click(
+      within(progress).getByRole("button", {
+        name: "installing dependencies, failed",
+      })
     );
-    const event = screen.getByTestId("chat-compact-launch");
-    expect(event.textContent).toContain("Launched");
-    expect(within(event).queryByRole("button")).toBeNull();
-    expect(screen.queryByTestId("chat-launch-startup")).toBeNull();
-    expect(screen.queryByTestId("chat-add-reaction")).toBeNull();
+    expect(progress.querySelector("pre")).toBeNull();
   });
 
   it("opens the launch thread and reveals prompt and instructions there", () => {

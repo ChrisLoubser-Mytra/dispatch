@@ -31,6 +31,8 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { type AgentRelation, agentRelation } from "@/lib/agent-lineage";
 import { AgentRelationBadge } from "@/components/app/agent-relation-badge";
 import { AgentSeatBadge } from "@/components/app/agent-seat-badge";
+import { ActivityBlock } from "./turn/activity-block";
+import { startupTrace } from "./turn/trace";
 import { turnAnswerText } from "@/components/app/chat/turn/answer-text";
 import { type FoldedEntry } from "@/components/app/chat/turn/turn-attachments";
 import {
@@ -1233,6 +1235,39 @@ function LaunchReviews({
   );
 }
 
+function LaunchStartup({
+  block,
+}: {
+  block: Extract<Block, { kind: "launch" }>;
+}): JSX.Element | null {
+  const startup = block.state?.startup;
+  if (!startup || (!startup.steps.length && !startup.failed)) return null;
+  const warnings = startup.steps.some((step) => step.status === "failed");
+  return (
+    <div
+      className="mt-3 min-w-0 font-terminal"
+      data-testid="chat-launch-startup"
+      aria-live="polite"
+    >
+      <ActivityBlock
+        trace={startupTrace(startup)}
+        label={
+          startup.readyAt
+            ? warnings
+              ? "Started with warnings"
+              : "Started"
+            : "Starting agent"
+        }
+      />
+      {startup.failed ? (
+        <p className="mt-2 break-words text-xs text-destructive">
+          {startup.failed}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function LaunchCard({
   block,
   ctx,
@@ -1309,6 +1344,7 @@ function LaunchCard({
             ? agentDisplayName(block.launchedByAgentId, ctx)
             : "you"}
         </div>
+        <LaunchStartup block={block} />
         <LaunchBriefing block={block} ctx={ctx} />
         <LaunchReviews block={block} ctx={ctx} inThread={inThread} />
         {!inThread ? <ThreadLine block={block} ctx={ctx} /> : null}

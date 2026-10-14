@@ -268,19 +268,48 @@ describe("ChatComposer", () => {
     await waitFor(() => expect(input.value).toBe(""));
   });
 
-  it("is disabled with an explanation when there is no terminal to send to", () => {
-    const { onSend, input } = renderComposer({
-      disabledReason: "The agent is not running.",
-    });
+  it.each(["The agent is not running.", "The agent is starting up."])(
+    "uses the disabled reason as the placeholder: %s",
+    (disabledReason) => {
+      const { onSend, input } = renderComposer({
+        disabledReason,
+      });
+      expect(input.disabled).toBe(true);
+      expect(input.placeholder).toBe(disabledReason);
+      expect(screen.queryByTestId("chat-composer-disabled-reason")).toBeNull();
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(onSend).not.toHaveBeenCalled();
+    }
+  );
+
+  it("keeps a disabled explanation visible for a retained draft and restores editing", () => {
+    const onSend = vi.fn();
+    const view = render(
+      <ChatComposer agentId={null} onSend={onSend} disabledReason={null} />
+    );
+    const input = screen.getByTestId(
+      "chat-composer-input"
+    ) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "Keep this draft" } });
+    view.rerender(
+      <ChatComposer
+        agentId={null}
+        onSend={onSend}
+        disabledReason="The agent is starting up."
+      />
+    );
     expect(input.disabled).toBe(true);
-    // The reason is stated once, in the helper line, not echoed as placeholder.
-    expect(input.placeholder).toBe("");
+    expect(input.value).toBe("Keep this draft");
     expect(
       screen.getByTestId("chat-composer-disabled-reason").textContent
-    ).toBe("The agent is not running.");
-    expect(screen.getAllByText("The agent is not running.")).toHaveLength(1);
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(onSend).not.toHaveBeenCalled();
+    ).toBe("The agent is starting up.");
+    view.rerender(
+      <ChatComposer agentId={null} onSend={onSend} disabledReason={null} />
+    );
+    expect(input.disabled).toBe(false);
+    expect(input.value).toBe("Keep this draft");
+    expect(input.placeholder).toBe("Message the agent…");
+    expect(screen.queryByTestId("chat-composer-disabled-reason")).toBeNull();
   });
 
   it("keeps the input usable but holds the button while a send is in flight", () => {

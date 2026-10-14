@@ -3,6 +3,7 @@ import path from "node:path";
 
 import type { FastifyBaseLogger } from "fastify";
 
+import { withToolSearchPath } from "../shared/lib/tool-environment.js";
 import { runCommand } from "../shared/lib/run-command.js";
 import { copyLocalConfigFiles } from "./worktree-local-config.js";
 
@@ -18,8 +19,15 @@ const LOCKFILE_INSTALL_COMMANDS: ReadonlyArray<
   ["pnpm-lock.yaml", "pnpm", ["install"]],
   ["yarn.lock", "yarn", ["install"]],
   ["package-lock.json", "npm", ["install"]],
+  ["bun.lock", "bun", ["install"]],
   ["bun.lockb", "bun", ["install"]],
 ];
+
+export type WorkspaceProgress = {
+  phase: "env" | "deps";
+  status?: "done" | "failed";
+  detail?: string;
+};
 
 /**
  * Prepare a freshly-created worktree for use as an agent workspace:
@@ -41,8 +49,10 @@ const LOCKFILE_INSTALL_COMMANDS: ReadonlyArray<
 export async function setupAgentWorkspace(
   originalCwd: string,
   worktreePath: string,
-  logger: FastifyBaseLogger
+  logger: FastifyBaseLogger,
+  onProgress?: (progress: WorkspaceProgress) => Promise<void>
 ): Promise<void> {
+  await onProgress?.({ phase: "env" });
   const copied = await copyLocalConfigFiles(originalCwd, worktreePath);
   if (copied.length > 0) {
     logger.info(
@@ -51,6 +61,7 @@ export async function setupAgentWorkspace(
     );
   }
 
+  await onProgress?.({ phase: "deps" });
   for (const [lockfile, bin, args] of LOCKFILE_INSTALL_COMMANDS) {
     const lockPath = path.join(worktreePath, lockfile);
     const exists = await stat(lockPath).catch(() => null);
@@ -63,13 +74,24 @@ export async function setupAgentWorkspace(
     try {
       await runCommand(bin, [...args], {
         cwd: worktreePath,
+        env: withToolSearchPath(),
         timeoutMs: 120_000,
       });
       logger.info(
         { worktreePath, packageManager: bin },
         "Dependency install complete."
       );
+      await onProgress?.({
+        phase: "deps",
+        status: "done",
+        detail: `${bin} install completed`,
+      });
     } catch (error) {
+      await onProgress?.({
+        phase: "deps",
+        status: "failed",
+        detail: `${bin} install failed; continuing launch; dependencies may be incomplete. ${error instanceof Error ? error.message : String(error)}`,
+      });
       logger.warn(
         { err: error, worktreePath, packageManager: bin },
         "Dependency install failed."
@@ -77,4 +99,10 @@ export async function setupAgentWorkspace(
     }
     return;
   }
+  await onProgress?.({
+    phase: "deps",
+    status: "done",
+    detail:
+      "No supported lockfile found; automatic dependency installation skipped.",
+  });
 }

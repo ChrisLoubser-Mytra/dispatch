@@ -9,6 +9,8 @@ vi.mock("../src/shared/lib/run-command.js", () => ({
 }));
 
 const { setupAgentWorkspace } = await import("../src/agents/workspace-prep.js");
+const { withToolSearchPath } =
+  await import("../src/shared/lib/tool-environment.js");
 const { runCommand } = await import("../src/shared/lib/run-command.js");
 
 const noopLogger = (() => {
@@ -81,6 +83,7 @@ describe("setupAgentWorkspace — auto deps install", () => {
     expect(installCall).toBeDefined();
     expect(installCall?.[1]).toEqual(["install"]);
     expect(installCall?.[2]?.cwd).toBe(worktreePath);
+    expect(installCall?.[2]?.env).toEqual(withToolSearchPath());
   });
 
   it("falls through the priority order — pnpm > yarn > npm > bun", async () => {
@@ -113,6 +116,33 @@ describe("setupAgentWorkspace — auto deps install", () => {
       .mocked(runCommand)
       .mock.calls.find(([cmd]) => cmd === "bun");
     expect(installCall).toBeDefined();
+  });
+
+  it("supports current Bun text lockfiles", async () => {
+    await writeFile(path.join(worktreePath, "bun.lock"), "");
+    await setupAgentWorkspace(originalCwd, worktreePath, noopLogger);
+    expect(vi.mocked(runCommand).mock.calls[0]?.[0]).toBe("bun");
+  });
+
+  it("reports ordered phases and the actual install failure while continuing", async () => {
+    await writeFile(path.join(worktreePath, "pnpm-lock.yaml"), "");
+    vi.mocked(runCommand).mockRejectedValue(new Error("spawn pnpm ENOENT"));
+    const onProgress = vi.fn().mockResolvedValue(undefined);
+    await setupAgentWorkspace(
+      originalCwd,
+      worktreePath,
+      noopLogger,
+      onProgress
+    );
+    expect(onProgress.mock.calls.map(([step]) => step)).toEqual([
+      { phase: "env" },
+      { phase: "deps" },
+      {
+        phase: "deps",
+        status: "failed",
+        detail: expect.stringContaining("spawn pnpm ENOENT"),
+      },
+    ]);
   });
 
   it("invokes no install command when no lockfile is present", async () => {
