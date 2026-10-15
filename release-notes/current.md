@@ -1,5 +1,5 @@
 ## What's Changed
-* Fix stream following after delayed automatic scroll events by @selfcontained in https://github.com/selfcontained/dispatch/pull/1244
+* fix(macos): exclude agent media from update recovery snapshots by @selfcontained in https://github.com/selfcontained/dispatch/pull/1245
 
 
-**Full Changelog**: https://github.com/selfcontained/dispatch/compare/v1.3.3...v1.3.4
+**Full Changelog**: https://github.com/selfcontained/dispatch/compare/v1.3.4...v1.3.5
