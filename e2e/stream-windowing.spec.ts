@@ -252,7 +252,7 @@ test.describe("Stream windowing", () => {
       );
     });
 
-    test(`a late resize respects an upward scroll before its event at width ${width}`, async ({
+    test(`a late resize respects a scroll beyond the tail buffer before its event at width ${width}`, async ({
       page,
       request,
     }) => {
@@ -270,7 +270,7 @@ test.describe("Stream windowing", () => {
         (el) =>
           new Promise<number>((resolve) => {
             requestAnimationFrame(() => {
-              el.scrollTop = el.scrollHeight - el.clientHeight - 100;
+              el.scrollTop = el.scrollHeight - el.clientHeight - 200;
               const top = el.scrollTop;
               const row = el.querySelectorAll<HTMLElement>(
                 "[data-chat-entry-id]"
