@@ -600,7 +600,7 @@ describe("ChatFeed", () => {
     }),
   };
 
-  it.each(["running", "done", "failed"] as const)(
+  it.each(["running", "done"] as const)(
     "keeps child %s startup out of the launch strip",
     (status) => {
       renderFeed([
@@ -610,7 +610,6 @@ describe("ChatFeed", () => {
             launchState: {
               startup: {
                 steps: [{ ...steps.worktree(), status }],
-                ...(status === "failed" ? { failed: "Failed setup" } : {}),
               },
             },
           })
@@ -620,6 +619,53 @@ describe("ChatFeed", () => {
       expect(event.textContent).toContain("Launched");
       expect(event.textContent).not.toContain("Launching");
       expect(screen.queryByTestId("chat-launch-startup")).toBeNull();
+    }
+  );
+
+  it.each(["failed", "warning", "empty failure"])(
+    "links child %s startup note to its existing thread",
+    (state) => {
+      const onOpenThread = vi.fn();
+      renderFeed(
+        [
+          blockEntry(
+            launchBlock({
+              id: "child-launch",
+              toAgentId: "agt_child",
+              launchState: {
+                startup: {
+                  steps:
+                    state === "empty failure"
+                      ? []
+                      : [
+                          {
+                            ...steps.worktree("failed"),
+                            detail: "Git worktree diagnostic",
+                          },
+                        ],
+                  ...(state === "warning"
+                    ? { readyAt: "2026-09-02T10:00:10.000Z" }
+                    : { failed: "Failed setup" }),
+                },
+              },
+            })
+          ),
+        ],
+        {},
+        { onOpenThread }
+      );
+      const card = screen.getByTestId("chat-compact-launch");
+      expect(within(card).queryByTestId("chat-launch-startup")).toBeNull();
+      expect(card.textContent).not.toContain("Git worktree diagnostic");
+      expect(card.textContent).not.toContain("Failed setup");
+      const note = within(card).getByTestId("launch-startup-note");
+      expect(note.textContent).toContain(
+        state === "warning" ? "Started with warnings" : "Launch error"
+      );
+      fireEvent.click(note);
+      expect(onOpenThread).toHaveBeenLastCalledWith("child-launch");
+      fireEvent.click(within(card).getByTestId("launch-open-thread-mobile"));
+      expect(onOpenThread).toHaveBeenLastCalledWith("child-launch");
     }
   );
 

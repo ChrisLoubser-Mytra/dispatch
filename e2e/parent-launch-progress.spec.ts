@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import {
   authHeaders,
   trackAgent,
@@ -18,6 +18,34 @@ import {
   createAgentViaAPI,
   loadApp,
 } from "./helpers";
+
+async function checkChildStartupThread(
+  page: Page,
+  label: string,
+  detail: string
+) {
+  const card = page.getByTestId("chat-compact-launch").first();
+  const panel = page.locator('[data-testid="chat-thread-panel"]:visible');
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(card.getByTestId("chat-launch-startup")).toHaveCount(0);
+    await expect(card).not.toContainText(detail);
+    const note = card.getByTestId(
+      width === 390 ? "launch-open-thread-mobile" : "launch-startup-note"
+    );
+    await expect(note).toContainText(label);
+    await note.click();
+    const progress = panel.getByTestId("chat-launch-startup");
+    await expect(progress).toBeVisible();
+    await progress.getByTestId("harness-activity-summary").click();
+    await progress.getByRole("button", { name: /, failed$/ }).click();
+    await expect(progress.getByTestId("harness-plain")).toContainText(detail);
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(panel).not.toBeVisible();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(note).toContainText(label);
+  }
+}
 
 test.afterEach(async ({ request }) => {
   await cleanupE2EAgents(request);
@@ -220,6 +248,15 @@ for (const scope of ["root", "child"] as const) {
             await expect(progress).toContainText("npm install completed");
         }
         if (scope === "child") {
+          if (fail) {
+            await checkChildStartupThread(
+              page,
+              "Started with warnings",
+              "launch-install-fixture-failed"
+            );
+            await page.setViewportSize({ width: 1280, height: 900 });
+          }
+          await expect(progress).toHaveCount(0);
           await card.getByTestId("launch-open-thread").click();
           await expect(page.getByTestId("chat-thread-panel")).toContainText(
             "Validate managed worktree preparation."
@@ -228,7 +265,7 @@ for (const scope of ["root", "child"] as const) {
             page
               .getByTestId("chat-thread-panel")
               .getByTestId("chat-launch-startup")
-          ).toHaveCount(0);
+          ).toHaveCount(fail ? 1 : 0);
           await expect(page.getByTestId("chat-thread-panel")).not.toContainText(
             "Launching"
           );
@@ -260,74 +297,94 @@ for (const scope of ["root", "child"] as const) {
   }
 }
 
-test("root launch records and persists a failed worktree phase", async ({
-  page,
-  request,
-}) => {
-  const repo = mkdtempSync(
-    path.join(os.tmpdir(), "dispatch-launch-worktree-error-")
-  );
-  try {
-    execFileSync("git", ["init", "-b", "main"], { cwd: repo, stdio: "ignore" });
-    writeFileSync(path.join(repo, "README.md"), "fixture");
-    execFileSync("git", ["add", "."], { cwd: repo });
-    execFileSync(
-      "git",
-      [
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.com",
-        "commit",
-        "-m",
-        "fixture",
-      ],
-      { cwd: repo, stdio: "ignore" }
+for (const scope of ["root", "child"] as const) {
+  test(`${scope} launch records and persists a failed worktree phase`, async ({
+    page,
+    request,
+  }) => {
+    const repo = mkdtempSync(
+      path.join(os.tmpdir(), "dispatch-launch-worktree-error-")
     );
-    const response = await request.post("/api/v1/agents", {
-      headers: authHeaders(),
-      data: {
-        name: `e2e-agent-worktree-error-${Date.now()}`,
-        type: "codex",
+    try {
+      execFileSync("git", ["init", "-b", "main"], {
         cwd: repo,
-        useWorktree: true,
-        worktreeBranch: "main",
-      },
-    });
-    expect(response.status()).toBe(201);
-    const { agent } = await response.json();
-    trackAgent(agent.id);
-    await expect
-      .poll(
-        async () =>
-          (
-            await (
-              await request.get(`/api/v1/agents/${agent.id}`, {
-                headers: authHeaders(),
-              })
-            ).json()
-          ).agent.status
-      )
-      .toBe("stopped");
-    await loadApp(page);
-    await clickAgentRow(page, agent.id);
-    const progress = page
-      .getByTestId("chat-launch-card")
-      .getByTestId("chat-launch-startup");
-    await expect(progress).toContainText("failed");
-    await progress.getByTestId("harness-activity-summary").click();
-    await expect(progress).toContainText("Worktree creation failed");
-    await expect(
-      progress.getByLabel("creating git worktree, failed", { exact: true })
-    ).toBeVisible();
-    await expect(progress.locator('[aria-label$=", running"]')).toHaveCount(0);
-    await page.reload({ waitUntil: "domcontentloaded" });
-    await expect(progress).toContainText("failed");
-    await progress.getByTestId("harness-activity-summary").click();
-    await expect(
-      progress.getByLabel("creating git worktree, failed", { exact: true })
-    ).toBeVisible();
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
-  }
-});
+        stdio: "ignore",
+      });
+      writeFileSync(path.join(repo, "README.md"), "fixture");
+      execFileSync("git", ["add", "."], { cwd: repo });
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.com",
+          "commit",
+          "-m",
+          "fixture",
+        ],
+        { cwd: repo, stdio: "ignore" }
+      );
+      const parent =
+        scope === "child" ? await createAgentViaAPI(request) : null;
+      const response = await request.post("/api/v1/agents", {
+        headers: authHeaders(),
+        data: {
+          ...(parent ? { parentAgentId: parent.id } : {}),
+          name: `e2e-agent-worktree-error-${Date.now()}`,
+          type: "codex",
+          cwd: repo,
+          useWorktree: true,
+          worktreeBranch: "main",
+        },
+      });
+      expect(response.status()).toBe(201);
+      const { agent } = await response.json();
+      trackAgent(agent.id);
+      await expect
+        .poll(
+          async () =>
+            (
+              await (
+                await request.get(`/api/v1/agents/${agent.id}`, {
+                  headers: authHeaders(),
+                })
+              ).json()
+            ).agent.status
+        )
+        .toBe("stopped");
+      await loadApp(page);
+      await clickAgentRow(page, parent?.id ?? agent.id);
+      if (scope === "child") {
+        await checkChildStartupThread(
+          page,
+          "Launch error",
+          "Worktree creation failed"
+        );
+      } else {
+        const progress = page
+          .getByTestId(
+            scope === "root" ? "chat-launch-card" : "chat-compact-launch"
+          )
+          .getByTestId("chat-launch-startup");
+        await expect(progress).toContainText("failed");
+        await progress.getByTestId("harness-activity-summary").click();
+        await expect(progress).toContainText("Worktree creation failed");
+        await expect(
+          progress.getByLabel("creating git worktree, failed", { exact: true })
+        ).toBeVisible();
+        await expect(progress.locator('[aria-label$=", running"]')).toHaveCount(
+          0
+        );
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect(progress).toContainText("failed");
+        await progress.getByTestId("harness-activity-summary").click();
+        await expect(
+          progress.getByLabel("creating git worktree, failed", { exact: true })
+        ).toBeVisible();
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+}
