@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { GitBranch, Info } from "lucide-react";
 
 import { BranchSelect } from "@/components/app/branch-select";
@@ -37,13 +38,23 @@ export function WorktreeSection({
   onCreateNewBranchChange,
 }: WorktreeSectionProps): JSX.Element {
   const worktreeChecked = worktreeAvailable && useWorktree;
-  const branchControlsEnabled = worktreeChecked;
-  const newBranchChecked = branchControlsEnabled && createNewBranch;
+  // Clip only while collapsed or animating; once open, let the branch
+  // dropdown overflow the section.
+  const [openSettled, setOpenSettled] = useState(worktreeChecked);
+  if (!worktreeChecked && openSettled) setOpenSettled(false);
+  // React 18 has no `inert` prop; keep collapsed controls out of the tab order.
+  const collapsibleRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = collapsibleRef.current;
+    if (!el) return;
+    if (worktreeChecked) el.removeAttribute("inert");
+    else el.setAttribute("inert", "");
+  }, [worktreeChecked]);
 
   return (
     <div
       className={cn(
-        "space-y-2 rounded-md border border-border/70 bg-muted/20 px-3 py-3 transition-opacity duration-200",
+        "rounded-md border border-border/70 bg-muted/20 px-3 py-3 transition-opacity duration-200",
         !worktreeAvailable && "opacity-60"
       )}
       data-testid="create-agent-worktree-section"
@@ -59,7 +70,6 @@ export function WorktreeSection({
             checked={worktreeChecked}
             onCheckedChange={(checked) => onUseWorktreeChange(checked === true)}
             disabled={!worktreeAvailable}
-            className="mt-0.5"
             title={
               worktreeAvailable
                 ? "Toggle managed git worktree"
@@ -67,16 +77,9 @@ export function WorktreeSection({
             }
             data-testid="create-agent-worktree"
           />
-          <span className="space-y-1">
-            <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-              <GitBranch className="h-3.5 w-3.5" />
-              Create managed git worktree
-            </span>
-            {!worktreeAvailable && (
-              <span className="block text-xs text-muted-foreground">
-                Requires a Git repository.
-              </span>
-            )}
+          <span className="flex h-5 items-center gap-1.5 text-sm font-medium text-foreground">
+            <GitBranch className="h-3.5 w-3.5" />
+            Create managed git worktree
           </span>
         </label>
         <TooltipProvider>
@@ -85,97 +88,82 @@ export function WorktreeSection({
               <button
                 type="button"
                 aria-label="About managed worktrees"
-                className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground"
+                className="flex h-5 shrink-0 items-center text-muted-foreground hover:text-foreground"
               >
                 <Info className="h-3.5 w-3.5" />
               </button>
             </TooltipTrigger>
             <TooltipContent className="max-w-64">
-              Creates an isolated worktree for this agent. Dispatch tracks and
-              cleans it up when the agent is archived.
+              {worktreeAvailable
+                ? "Creates an isolated worktree for this agent. Dispatch tracks and cleans it up when the agent is archived."
+                : "Requires a Git repository."}
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>
       </div>
       <div
-        aria-disabled={!branchControlsEnabled}
+        ref={collapsibleRef}
+        aria-hidden={!worktreeChecked}
+        onTransitionEnd={(event) => {
+          if (event.target === event.currentTarget && worktreeChecked) {
+            setOpenSettled(true);
+          }
+        }}
         className={cn(
           "grid transition-[grid-template-rows,opacity] duration-200 ease-out",
-          branchControlsEnabled
+          worktreeChecked
             ? "grid-rows-[1fr] opacity-100"
-            : "grid-rows-[1fr] opacity-60"
+            : "grid-rows-[0fr] opacity-0"
         )}
       >
-        <div className="min-h-0">
-          <div className="ml-8 w-[calc(100%-2rem)] space-y-3 pt-1">
-            <BranchSelect
-              cwd={cwd}
-              baseBranch={baseBranch}
-              onBaseBranchChange={onBaseBranchChange}
-              worktreeBranch={worktreeBranch}
-              onWorktreeBranchChange={onWorktreeBranchChange}
-              baseBranchLabel="Starting branch"
-              baseBranchHelper="The branch to check out in the worktree."
-              showNewBranchInput={false}
-              testIdPrefix="create-agent"
-              disabled={!branchControlsEnabled}
-            />
-            <div
-              aria-disabled={!branchControlsEnabled}
-              className="space-y-2 rounded-md border border-border/60 bg-background/40 px-3 py-3"
-            >
+        <div
+          className={cn(
+            "min-h-0",
+            !(worktreeChecked && openSettled) && "overflow-hidden"
+          )}
+        >
+          <div className="space-y-2 pt-2">
+            <div className="ml-8 w-[calc(100%-2rem)]">
+              <BranchSelect
+                cwd={cwd}
+                baseBranch={baseBranch}
+                onBaseBranchChange={onBaseBranchChange}
+                worktreeBranch={worktreeBranch}
+                onWorktreeBranchChange={onWorktreeBranchChange}
+                baseBranchLabel="Starting branch"
+                showNewBranchInput={false}
+                testIdPrefix="create-agent"
+                disabled={!worktreeChecked}
+              />
+            </div>
+            <div className="space-y-1">
               <label
-                className={cn(
-                  "flex items-start gap-3",
-                  branchControlsEnabled
-                    ? "cursor-pointer"
-                    : "cursor-not-allowed"
-                )}
+                htmlFor="create-agent-new-branch"
+                className="ml-8 block cursor-pointer text-xs text-muted-foreground"
               >
+                New branch
+              </label>
+              <div className="flex items-center gap-3">
                 <Checkbox
-                  checked={newBranchChecked}
+                  id="create-agent-new-branch"
+                  checked={createNewBranch}
                   onCheckedChange={(checked) =>
                     onCreateNewBranchChange(checked === true)
                   }
-                  className="mt-0.5"
                   title="Toggle new branch creation"
                   data-testid="create-agent-new-branch"
-                  disabled={!branchControlsEnabled}
+                  disabled={!worktreeChecked}
                 />
-                <span className="space-y-1">
-                  <span className="block text-sm font-medium text-foreground">
-                    Create a new branch in this worktree
-                  </span>
-                  <span className="block text-xs text-muted-foreground">
-                    Branch off the starting branch for this agent’s changes.
-                  </span>
-                </span>
-              </label>
-              <div
-                aria-disabled={!newBranchChecked}
-                className={cn(
-                  "grid transition-[grid-template-rows,opacity] duration-200 ease-out",
-                  newBranchChecked
-                    ? "grid-rows-[1fr] opacity-100"
-                    : "grid-rows-[1fr] opacity-60"
-                )}
-              >
-                <div className="min-h-0">
-                  <div className="space-y-1 pt-2">
-                    <label className="block text-xs text-muted-foreground">
-                      New branch name
-                    </label>
-                    <Input
-                      value={worktreeBranch}
-                      onChange={(event) =>
-                        onWorktreeBranchChange(event.target.value)
-                      }
-                      placeholder="auto-generated if empty"
-                      data-testid="create-agent-worktree-branch"
-                      disabled={!newBranchChecked}
-                    />
-                  </div>
-                </div>
+                <Input
+                  value={createNewBranch ? worktreeBranch : ""}
+                  onChange={(event) =>
+                    onWorktreeBranchChange(event.target.value)
+                  }
+                  placeholder={createNewBranch ? "auto-generated if empty" : ""}
+                  aria-label="New branch name"
+                  data-testid="create-agent-worktree-branch"
+                  disabled={!worktreeChecked || !createNewBranch}
+                />
               </div>
             </div>
           </div>
