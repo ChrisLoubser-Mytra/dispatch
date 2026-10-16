@@ -18,7 +18,7 @@ function fixture(active = true) {
       cancelAsyncMessage: vi.fn(async (_uuid: string) => true),
       interrupt: vi.fn(async () => undefined),
     },
-    pendingUserInputCount: 0,
+    openUserInputs: new Set(),
     msgLifecycleV1: true,
     orphanCommands: new Map<string, string>(),
     pendingOrphanResults: 0,
@@ -30,6 +30,19 @@ function fixture(active = true) {
     exitPlan: { cancel: vi.fn() },
     trackOrphanCommand: vi.fn(
       Reflect.get(ClaudeAcpAgent.prototype, "trackOrphanCommand")
+    ),
+    forgetLegacyOrphan: Reflect.get(
+      ClaudeAcpAgent.prototype,
+      "forgetLegacyOrphan"
+    ),
+    cancelTurns: Reflect.get(ClaudeAcpAgent.prototype, "cancelTurns"),
+    dropQueuedMessages: Reflect.get(
+      ClaudeAcpAgent.prototype,
+      "dropQueuedMessages"
+    ),
+    stopBackgroundWorkflows: Reflect.get(
+      ClaudeAcpAgent.prototype,
+      "stopBackgroundWorkflows"
     ),
     forceCancelGraceMs: 30_000,
     logger: { error: vi.fn() },
@@ -52,7 +65,9 @@ describe("patched Claude adapter steering", () => {
     "uses next between tools, later with %i pending user-input callbacks",
     async (pending) => {
       const { session, steer } = fixture();
-      session.pendingUserInputCount = pending;
+      session.openUserInputs = new Set(
+        Array.from({ length: pending }, () => ({}))
+      );
       await expect(steer()).resolves.toEqual({ outcome: "injected" });
       expect(session.input.push).toHaveBeenCalledWith(
         expect.objectContaining({ priority: pending > 0 ? "later" : "next" })
@@ -72,7 +87,7 @@ describe("patched Claude adapter steering", () => {
       );
       await cancel();
       expect(session.query.cancelAsyncMessage.mock.calls).toEqual(
-        uuids.map((uuid) => [uuid])
+        [...uuids, ...(active ? [] : ["original-prompt"])].map((uuid) => [uuid])
       );
       expect(
         session.query.cancelAsyncMessage.mock.invocationCallOrder.at(-1)
@@ -90,7 +105,7 @@ describe("patched Claude adapter steering", () => {
 
   it("waits for withdrawal to finish before interrupting", async () => {
     const { session, steer, cancel } = fixture();
-    session.pendingUserInputCount = 1;
+    session.openUserInputs.add({});
     await steer();
     let release!: (withdrawn: boolean) => void;
     session.query.cancelAsyncMessage.mockImplementation(
@@ -106,6 +121,81 @@ describe("patched Claude adapter steering", () => {
     expect(session.query.interrupt).not.toHaveBeenCalled();
     release(true);
     await cancellation;
+    expect(session.query.interrupt).toHaveBeenCalledOnce();
+  });
+
+  it("drops a queued prompt once alongside withdrawn steers", async () => {
+    const { session, steer, cancel } = fixture();
+    await steer();
+    const uuid = session.input.push.mock.calls[0]![0].uuid;
+    const queued = {
+      promptUuid: "queued-prompt",
+      settled: false,
+      resolve: vi.fn(),
+    };
+    session.turnQueue.push(queued);
+    await cancel();
+    expect(queued.resolve).toHaveBeenCalledWith({ stopReason: "cancelled" });
+    expect(session.query.cancelAsyncMessage.mock.calls).toEqual([
+      [uuid],
+      ["queued-prompt"],
+    ]);
+    expect(
+      session.query.cancelAsyncMessage.mock.invocationCallOrder.at(-1)
+    ).toBeLessThan(session.query.interrupt.mock.invocationCallOrder[0]!);
+  });
+
+  it("drops remaining steers without duplicating a timed-out withdrawal", async () => {
+    const { agent, session, steer, cancel } = fixture();
+    agent.forceCancelGraceMs = 40;
+    await steer();
+    await steer();
+    const uuids = session.input.push.mock.calls.map(
+      ([message]) => message.uuid
+    );
+    session.query.cancelAsyncMessage.mockImplementation(
+      () => new Promise<boolean>(() => {})
+    );
+    await cancel();
+    expect(session.query.cancelAsyncMessage.mock.calls).toEqual(
+      uuids.map((uuid) => [uuid])
+    );
+    expect(session.query.interrupt).toHaveBeenCalledOnce();
+  });
+
+  it("reconciles only outstanding steers from the interrupt receipt", async () => {
+    const { session, steer, cancel } = fixture();
+    session.msgLifecycleV1 = false;
+    // One unrelated orphan must survive; a successfully withdrawn steer must
+    // not be subtracted again when it is absent from the interrupt receipt.
+    session.pendingOrphanResults = 1;
+    await steer();
+    await steer();
+    session.query.cancelAsyncMessage
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    session.query.interrupt.mockResolvedValue({ still_queued: [] } as never);
+    await cancel();
+    expect(session.pendingOrphanResults).toBe(1);
+  });
+
+  it("keeps teardown nonblocking and drops each abandoned message once", async () => {
+    const { agent, session, steer } = fixture(false);
+    await steer();
+    const uuid = session.input.push.mock.calls[0]![0].uuid;
+    session.query.cancelAsyncMessage.mockImplementation(
+      () => new Promise<boolean>(() => {})
+    );
+    session.query.interrupt.mockImplementation(() => new Promise(() => {}));
+    await agent.cancelTurns.call(
+      agent,
+      { sessionId },
+      { awaitInterrupt: false }
+    );
+    expect(session.query.cancelAsyncMessage.mock.calls).toEqual([
+      [uuid],
+      ["original-prompt"],
+    ]);
     expect(session.query.interrupt).toHaveBeenCalledOnce();
   });
 
@@ -223,6 +313,7 @@ function consumerFixture() {
 function makeTurn(uuid: string) {
   return {
     promptUuid: uuid,
+    events: { inserted: vi.fn(), running: vi.fn() },
     settled: false,
     isLocalOnlyCommand: true,
     resolve: vi.fn(),
@@ -375,6 +466,216 @@ describe("Claude cancellation with concurrent consumer events", () => {
       await stop();
     }
   });
+
+  it.each(
+    ["queued-prompt", "second-steer"].flatMap((remaining) => [
+      [remaining, "withdrawal", "false"],
+      [remaining, "withdrawal", "true"],
+      [remaining, "withdrawal", "rejection"],
+      [remaining, "interrupt", "false"],
+    ])
+  )(
+    "keeps the %s orphan when a steer result drains during %s (%s reply)",
+    async (remaining, phase, outcome) => {
+      const { adapter, session, messages, stop } = consumerFixture();
+      Object.assign(session, {
+        msgLifecycleV1: false,
+        pendingOrphanResults: 0,
+      });
+      const active = makeTurn("legacy-owner");
+      active.steeredEchoes = new Set([
+        "consumed-steer",
+        ...(remaining === "second-steer" ? [remaining] : []),
+      ]);
+      session.activeTurn = active;
+      session.turnQueue.push(active);
+      if (remaining === "queued-prompt")
+        session.turnQueue.push(makeTurn(remaining));
+      let release!: () => void;
+      if (phase === "withdrawal") {
+        session.query.cancelAsyncMessage.mockImplementationOnce(
+          () =>
+            new Promise<boolean>((resolve, reject) => {
+              release = () =>
+                outcome === "rejection"
+                  ? reject(new Error("late withdrawal failure"))
+                  : resolve(outcome === "true");
+            })
+        );
+        session.query.interrupt.mockResolvedValue({
+          still_queued: [remaining],
+        } as never);
+      } else {
+        session.query.interrupt.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              release = () => resolve({ still_queued: [remaining] } as never);
+            })
+        );
+      }
+      try {
+        const cancellation = adapter.cancel({ sessionId });
+        await vi.waitFor(() =>
+          phase === "withdrawal"
+            ? expect(session.query.cancelAsyncMessage).toHaveBeenCalledOnce()
+            : expect(session.query.interrupt).toHaveBeenCalledOnce()
+        );
+        expect(Reflect.get(session, "pendingOrphanResults")).toBe(2);
+        messages.push(idle);
+        await vi.waitFor(() => expect(active.resolve).toHaveBeenCalled());
+        messages.push(result());
+        await vi.waitFor(() =>
+          expect(Reflect.get(session, "pendingOrphanResults")).toBe(1)
+        );
+        release();
+        await cancellation;
+        expect(Reflect.get(session, "pendingOrphanResults")).toBe(1);
+        const next = makeTurn("next-echo-less-command");
+        session.turnQueue.push(next);
+        const readsBefore = session.query.next.mock.calls.length;
+        messages.push(result());
+        await vi.waitFor(() =>
+          expect(session.query.next.mock.calls.length).toBeGreaterThan(
+            readsBefore
+          )
+        );
+        expect(Reflect.get(session, "pendingOrphanResults")).toBe(0);
+        expect(next.resolve).not.toHaveBeenCalled();
+        messages.push(result());
+        await vi.waitFor(() =>
+          expect(next.resolve).toHaveBeenCalledWith(
+            expect.objectContaining({ stopReason: "end_turn" })
+          )
+        );
+        expect(next.reject).not.toHaveBeenCalled();
+      } finally {
+        await stop();
+      }
+    }
+  );
+
+  it.each(["single", "multiple"])(
+    "uses a %s stamped legacy result when an earlier seed was dropped",
+    async (stamp) => {
+      const { adapter, session, messages, stop } = consumerFixture();
+      Object.assign(session, {
+        msgLifecycleV1: false,
+        pendingOrphanResults: 0,
+      });
+      const active = makeTurn("legacy-owner");
+      const consumed = [
+        "consumed-second",
+        ...(stamp === "multiple" ? ["consumed-third"] : []),
+      ];
+      active.steeredEchoes = new Set(["dropped-first", ...consumed]);
+      session.activeTurn = active;
+      session.turnQueue.push(active);
+      let release!: () => void;
+      session.query.interrupt.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve({ still_queued: consumed } as never);
+          })
+      );
+      try {
+        const cancellation = adapter.cancel({ sessionId });
+        await vi.waitFor(() =>
+          expect(session.query.interrupt).toHaveBeenCalledOnce()
+        );
+        messages.push(idle);
+        await vi.waitFor(() => expect(active.resolve).toHaveBeenCalled());
+        messages.push(
+          stamp === "single"
+            ? result("consumed-second")
+            : {
+                ...result(),
+                user_message_uuids: consumed,
+              }
+        );
+        await vi.waitFor(() =>
+          expect(Reflect.get(session, "pendingOrphanResults")).toBe(1)
+        );
+        release();
+        await cancellation;
+        expect(Reflect.get(session, "pendingOrphanResults")).toBe(0);
+        const next = makeTurn("next-echo-less-command");
+        session.turnQueue.push(next);
+        messages.push(result());
+        await vi.waitFor(() =>
+          expect(next.resolve).toHaveBeenCalledWith(
+            expect.objectContaining({ stopReason: "end_turn" })
+          )
+        );
+        expect(next.reject).not.toHaveBeenCalled();
+      } finally {
+        await stop();
+      }
+    }
+  );
+
+  it.each(["immediate", "late"])(
+    "reconciles a legacy fallback drop with a %s response before the next echo-less result",
+    async (response) => {
+      const { adapter, session, messages, stop } = consumerFixture();
+      adapter.forceCancelGraceMs = 100;
+      Object.assign(session, {
+        msgLifecycleV1: false,
+        pendingOrphanResults: 0,
+      });
+      const active = makeTurn("legacy-owner");
+      active.steeredEchoes = new Set(["first-steer", "fallback-steer"]);
+      session.activeTurn = active;
+      session.turnQueue.push(active);
+      let releaseFallback!: (value: boolean) => void;
+      session.query.cancelAsyncMessage
+        .mockImplementationOnce(() => new Promise<boolean>(() => {}))
+        .mockImplementationOnce(() =>
+          response === "immediate"
+            ? Promise.resolve(true)
+            : new Promise<boolean>((resolve) => {
+                releaseFallback = resolve;
+              })
+        );
+      session.query.interrupt.mockResolvedValue({
+        still_queued: ["first-steer"],
+      } as never);
+      try {
+        await adapter.cancel({ sessionId });
+        expect(session.query.cancelAsyncMessage.mock.calls).toEqual([
+          ["first-steer"],
+          ["fallback-steer"],
+        ]);
+        expect(Reflect.get(session, "pendingOrphanResults")).toBe(1);
+        messages.push(idle);
+        await vi.waitFor(() => expect(active.resolve).toHaveBeenCalled());
+        // Only the first steer survived the interrupt and can produce a result.
+        messages.push(result());
+        await vi.waitFor(() =>
+          expect(Reflect.get(session, "pendingOrphanResults")).toBe(0)
+        );
+        const next = makeTurn("next-echo-less-command");
+        session.turnQueue.push(next);
+        messages.push(result());
+        await vi.waitFor(() =>
+          expect(next.resolve).toHaveBeenCalledWith(
+            expect.objectContaining({ stopReason: "end_turn" })
+          )
+        );
+        if (response === "late") {
+          // A late control reply must not subtract from a later cancellation's
+          // legacy accounting. No asynchronous fallback reconciliation is needed:
+          // the interrupt receipt already accounted for this dropped UUID.
+          Object.assign(session, { pendingOrphanResults: 1 });
+          releaseFallback(true);
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          expect(Reflect.get(session, "pendingOrphanResults")).toBe(1);
+        }
+        expect(next.reject).not.toHaveBeenCalled();
+      } finally {
+        await stop();
+      }
+    }
+  );
 
   it("settles the owning prompt at the floor when withdrawal never resolves", async () => {
     const { adapter, session, stop } = consumerFixture();
