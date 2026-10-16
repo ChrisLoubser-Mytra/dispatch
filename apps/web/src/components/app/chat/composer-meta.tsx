@@ -62,6 +62,8 @@ import {
   formatExtraUsage,
   formatLimitResets,
   formatResetExpiry,
+  hasExpiringResets,
+  resetExpiresSoon,
   pickableOptions,
   reportAge,
   resetsIn,
@@ -297,10 +299,26 @@ function UsageChip({
   usage: AgentUsageResponse | undefined;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
+  // Read once on mount (including a closed chip), then use the shared cache.
+  // No network polling: the local clock alone keeps expiry reminders current.
+  const plans = useProviderPlans(true);
+  const { isStale, refetch } = plans;
+  const now = useNow(true);
+  const expiring = (plans.data?.providers ?? []).some(
+    (plan) =>
+      plan.engine === "codex" && hasExpiringResets(plan.limitResets, now)
+  );
   const percent = contextPercent(usage);
   const usageLabel = percent === null ? "Usage" : `${percent}% context`;
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        // Preserve the old open-time stale refresh without forcing a provider read.
+        if (next && isStale) void refetch();
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"
@@ -310,10 +328,23 @@ function UsageChip({
             !agent && "col-start-2"
           )}
           title="Usage"
-          aria-label={usageLabel}
+          aria-label={
+            expiring
+              ? `${usageLabel} · Codex reset credit expires within seven days`
+              : usageLabel
+          }
           data-testid="composer-usage-chip"
         >
-          <Gauge className="h-3 w-3 shrink-0" aria-hidden="true" />
+          <span className="relative inline-flex shrink-0">
+            <Gauge className="h-3 w-3" aria-hidden="true" />
+            {expiring ? (
+              <span
+                className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-primary ring-2 ring-background"
+                aria-hidden="true"
+                data-testid="composer-usage-expiry-dot"
+              />
+            ) : null}
+          </span>
           <span className="composer-usage-full">{usageLabel}</span>
           <span className="composer-usage-short hidden">
             {percent === null ? "Usage" : `${percent}% ctx`}
@@ -337,7 +368,7 @@ function UsageChip({
         {agent ? (
           <UsageDetails usage={usage} agentType={agent.type ?? null} />
         ) : null}
-        <PlanLimits enabled={open} />
+        <PlanLimits enabled={open} plans={plans} now={now} />
       </PopoverContent>
     </Popover>
   );
@@ -681,10 +712,16 @@ function PlanLimitsSkeleton(): JSX.Element {
   );
 }
 
-function PlanLimits({ enabled }: { enabled: boolean }): JSX.Element {
-  const plans = useProviderPlans(enabled);
+function PlanLimits({
+  enabled,
+  plans,
+  now,
+}: {
+  enabled: boolean;
+  plans: ReturnType<typeof useProviderPlans>;
+  now: number;
+}): JSX.Element {
   const providers = inEngineOrder(plans.data?.providers ?? []);
-  const now = useNow(enabled);
   const busy = plans.isFetching || plans.refresh.isPending;
   const failure = plans.refresh.error ?? plans.error;
   // The first open ever shows a guessed skeleton, and the answer can have
@@ -829,6 +866,7 @@ export function UseResetButton({
   const resets: PlanLimitResets | undefined = plan.limitResets;
   const available = resets?.available ?? 0;
   const expiry = formatResetExpiry(resets, now);
+  const expiring = plan.engine === "codex" && hasExpiringResets(resets, now);
   // Every way out (button, Escape, overlay) forgets the last answer, so the
   // next open asks for confirmation again rather than showing an old result.
   const close = () => {
@@ -850,7 +888,11 @@ export function UseResetButton({
       {/* When the resets lapse at the left, the action at the right. */}
       <div className="flex items-center justify-between gap-2">
         <span
-          className="truncate text-[11px] text-muted-foreground/80"
+          className={cn(
+            "truncate text-[11px]",
+            expiring ? "text-primary" : "text-muted-foreground/80"
+          )}
+          data-testid="usage-codex-reset-expiry"
           title={expiry ? `Resets expire: ${expiry}` : undefined}
         >
           {expiry ?? ""}
@@ -898,7 +940,14 @@ export function UseResetButton({
               {resets.items.map((item, index) => (
                 <li
                   key={item.id}
-                  className="flex justify-between gap-2 text-muted-foreground"
+                  className={cn(
+                    "flex justify-between gap-2",
+                    plan.engine === "codex" &&
+                      available > 0 &&
+                      resetExpiresSoon(item.expiresAt, now)
+                      ? "text-primary"
+                      : "text-muted-foreground"
+                  )}
                 >
                   <span className="truncate">
                     {item.title}
