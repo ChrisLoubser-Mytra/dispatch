@@ -1,12 +1,50 @@
 import { useEffect, useState } from "react";
-import { Clock3, CornerDownRight } from "lucide-react";
+import { Clock, Clock3, CornerDownRight } from "lucide-react";
 
 import { type Agent } from "@/components/app/types";
 import { TurnGlyph } from "@/components/app/chat/turn/activity-block";
 import { ActivityBars } from "@/components/ui/activity-bars";
 import { useAgentTurnLabel } from "@/hooks/use-agent-turn-label";
+import { useLocalDay } from "@/hooks/use-local-day";
 import { useJumpToTurn } from "@/hooks/use-block-jump";
 import { cn } from "@/lib/utils";
+
+import {
+  scheduleTime,
+  sidebarScheduleTime,
+  scheduleTimezone,
+  useUpcomingSchedule,
+} from "./scheduled-messages";
+
+function ScheduledActivity({
+  agentId,
+  className,
+}: {
+  agentId: string;
+  className?: string;
+}) {
+  const schedule = useUpcomingSchedule(agentId);
+  const today = useLocalDay();
+  if (!schedule) return null;
+  return (
+    <div
+      className={cn(
+        "flex min-w-0 items-center gap-1.5 text-heading-accent-1",
+        className
+      )}
+      data-testid={`agent-scheduled-activity-${agentId}`}
+      title={`Next scheduled message: ${scheduleTime(schedule.nextDueAt)} (${scheduleTimezone()})`}
+    >
+      <Clock aria-hidden="true" className="h-3 w-3 shrink-0" />
+      <span className="min-w-0 truncate font-medium">
+        Next{" "}
+        <time dateTime={schedule.nextDueAt}>
+          {sidebarScheduleTime(schedule.nextDueAt, today)}
+        </time>
+      </span>
+    </div>
+  );
+}
 
 /** Reconnection uses the normal activity slot rather than an error paragraph. */
 function ReconnectActivity({
@@ -61,11 +99,13 @@ export function AgentActivityLabel({
   agent,
   className,
   linkToTurn = false,
+  scheduledFallback = false,
   onNavigate,
 }: {
   agent: Agent;
   className?: string;
   linkToTurn?: boolean;
+  scheduledFallback?: boolean;
   /** Called as the link navigates (a mobile sidebar closes itself). */
   onNavigate?: () => void;
 }): JSX.Element | null {
@@ -75,7 +115,10 @@ export function AgentActivityLabel({
   if (agent.reconnect) {
     return <ReconnectActivity agent={agent} className={className} />;
   }
-  if (!turn || !step) return null;
+  if (!turn || !step)
+    return scheduledFallback ? (
+      <ScheduledActivity agentId={agent.id} className={className} />
+    ) : null;
 
   const content = (
     <>

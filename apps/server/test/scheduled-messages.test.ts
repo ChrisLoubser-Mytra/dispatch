@@ -35,6 +35,7 @@ let live = true;
 let notice: ReturnType<typeof vi.fn>;
 let warn: ReturnType<typeof vi.fn>;
 let outcome: ReturnType<typeof vi.fn>;
+let refreshNotice: ReturnType<typeof vi.fn>;
 const input = () => ({
   title: "Check deployment",
   message: "Check it",
@@ -72,6 +73,7 @@ beforeEach(async () => {
   notice = vi.fn(async () => ({ id: crypto.randomUUID() }));
   warn = vi.fn();
   outcome = vi.fn(async () => {});
+  refreshNotice = vi.fn(async () => {});
   service = new ScheduledMessageService(
     pool,
     {
@@ -83,13 +85,71 @@ beforeEach(async () => {
       scheduledNoticeOutcome: outcome,
       scheduledNoticePending: async () => {},
       scheduledNotice: notice,
-      refreshScheduledNotice: async () => {},
+      refreshScheduledNotice: refreshNotice,
       resolvePromptSource: async (_id: string, s: PromptSource) => s,
     } as unknown as StreamService,
     { warn }
   );
 });
 describe("scheduled messages", () => {
+  it("summarizes the earliest eligible delivery per agent and follows schedule changes", async () => {
+    expect(await service.upcoming()).toEqual({});
+    const later = await service.create(id, {
+      ...input(),
+      deliver_at: new Date(Date.now() + 120000).toISOString(),
+    });
+    const early = await service.create(id, {
+      ...input(),
+      deliver_at: new Date(Date.now() + 60000).toISOString(),
+    });
+    expect(await service.upcoming()).toEqual({
+      [id]: { id: early.id, nextDueAt: early.nextDueAt },
+    });
+    for (const status of [
+      "paused",
+      "uncertain",
+      "cancelled",
+      "completed",
+      "expired",
+      "limit_reached",
+    ]) {
+      await pool.query(
+        "UPDATE scheduled_messages SET payload = jsonb_set(payload, '{status}', to_jsonb($2::text)) WHERE id=$1",
+        [early.id, status]
+      );
+      expect(await service.upcoming()).toEqual({
+        [id]: { id: later.id, nextDueAt: later.nextDueAt },
+      });
+    }
+    await service.change(id, later.id, "pause");
+    expect(await service.upcoming()).toEqual({});
+    await service.change(id, later.id, "resume");
+    expect((await service.upcoming())[id]?.id).toBe(later.id);
+    for (const patch of [
+      { expiresAt: new Date(Date.now() - 1000).toISOString() },
+      { deliveredCount: later.maxDeliveries },
+      { nextDueAt: later.expiresAt },
+    ]) {
+      await pool.query("UPDATE scheduled_messages SET payload=$2 WHERE id=$1", [
+        later.id,
+        JSON.stringify({ ...later, ...patch }),
+      ]);
+      expect(await service.upcoming()).toEqual({});
+    }
+    const dueAt = new Date(Date.now() - 1000).toISOString();
+    await pool.query("UPDATE scheduled_messages SET payload=$2 WHERE id=$1", [
+      later.id,
+      JSON.stringify({
+        ...later,
+        nextDueAt: later.expiresAt,
+        outstanding: { phase: "pending", dueAt },
+      }),
+    ]);
+    expect((await service.upcoming())[id]).toEqual({
+      id: later.id,
+      nextDueAt: dueAt,
+    });
+  });
   it.each([
     [90, "Every 1 minute 30 seconds"],
     [100, "Every 1 minute 40 seconds"],
@@ -174,6 +234,82 @@ describe("scheduled messages", () => {
     settle();
     await flush();
   });
+  it.each(["pickedUp", "settled"] as const)(
+    "publishes recurring boundaries during accepted delivery ticks and release by %s",
+    async (reason) => {
+      let observedNextDueAt: string | undefined;
+      refreshNotice.mockImplementation(async () => {
+        // Represents an already-mounted summary observer refetching when the
+        // card notice arrives: it must see the committed timing immediately.
+        observedNextDueAt = (await service.upcoming())[id]?.nextDueAt;
+      });
+      const schedule = await service.create(id, input());
+      const due = Date.parse(schedule.deliverAt);
+      await service.tick(due);
+      expect(await options.beforeSubmit!()).toBe(true);
+      accept();
+      await vi.waitFor(async () => {
+        expect((await service.list(id))[0]!.outstanding?.phase).toBe(
+          "accepted"
+        );
+      });
+      const beforeRelease = (await service.upcoming())[id]!;
+      expect(beforeRelease.nextDueAt).toBe(
+        new Date(due + 300000).toISOString()
+      );
+      await vi.waitFor(() =>
+        expect(observedNextDueAt).toBe(beforeRelease.nextDueAt)
+      );
+      refreshNotice.mockClear();
+      observedNextDueAt = undefined;
+
+      const clock = vi.spyOn(Date, "now").mockReturnValue(due + 300001);
+      try {
+        // Cadence advances while the accepted delivery still waits for pickup.
+        await service.tick(Date.now());
+        expect((await service.list(id))[0]!.outstanding?.phase).toBe(
+          "accepted"
+        );
+        expect(observedNextDueAt).toBe(new Date(due + 600000).toISOString());
+        expect(refreshNotice).toHaveBeenCalledOnce();
+        refreshNotice.mockClear();
+        observedNextDueAt = undefined;
+
+        // Pickup/settlement crosses another boundary without a scheduler tick.
+        const now = due + 600001;
+        clock.mockReturnValue(now);
+        if (reason === "pickedUp") {
+          await service.receipt({
+            type: "steering_picked_up",
+            agentId: id,
+            receiptId: "late-pickup",
+            source,
+            at: new Date(now).toISOString(),
+          });
+        } else {
+          settle();
+        }
+        const nextDueAt = new Date(due + 900000).toISOString();
+        await vi.waitFor(() => {
+          expect(refreshNotice).toHaveBeenCalledWith(
+            id,
+            schedule.cardId,
+            schedule.id,
+            expect.any(String),
+            expect.objectContaining({ status: "active", nextDueAt })
+          );
+        });
+        await vi.waitFor(() => expect(observedNextDueAt).toBe(nextDueAt));
+        expect((await service.list(id))[0]!.outstanding).toBeNull();
+        expect((await service.upcoming())[id]).toEqual({
+          id: schedule.id,
+          nextDueAt,
+        });
+      } finally {
+        clock.mockRestore();
+      }
+    }
+  );
   it("cancels unaccepted queued delivery but leaves accepted delivery in place", async () => {
     const s = await service.create(id, input());
     await service.tick(Date.parse(s.deliverAt));
