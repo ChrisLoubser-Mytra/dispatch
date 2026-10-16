@@ -207,6 +207,8 @@ export function AgentsView({
     animatingFileKeys,
     unseenFileCount,
     lightboxFileId,
+    lightboxCaption,
+    lightboxIndex,
     lightboxFileIds,
     setLightboxFileId,
     openLightbox,
@@ -781,6 +783,8 @@ export function AgentsView({
         setStopTarget={setStopTarget}
         onStop={stopAgent}
         lightboxFileId={lightboxFileId}
+        lightboxCaption={lightboxCaption}
+        lightboxIndex={lightboxIndex}
         lightboxFileIds={lightboxFileIds}
         setLightboxFileId={setLightboxFileId}
       />

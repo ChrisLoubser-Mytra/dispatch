@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, Loader2, X } from "lucide-react";
 
@@ -17,8 +17,12 @@ import { cn } from "@/lib/utils";
 
 type FileLightboxProps = {
   fileId: number | null;
+  /** Post-specific image caption; empty means use its filename, not registry metadata. */
+  attachmentCaption?: string;
   fileIds: number[];
-  setFileId: (fileId: number | null) => void;
+  /** Occurrence position for a post gallery, which may repeat file IDs. */
+  fileIndex?: number;
+  setFileId: (fileId: number | null, occurrenceIndex?: number) => void;
 };
 
 async function fetchFileItem(fileId: number): Promise<FileItem> {
@@ -38,7 +42,9 @@ export { FileActions } from "@/components/app/file-lightbox-actions";
 
 export function FileLightbox({
   fileId,
+  attachmentCaption,
   fileIds,
+  fileIndex,
   setFileId,
 }: FileLightboxProps): JSX.Element | null {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -53,11 +59,20 @@ export function FileLightbox({
     enabled: fileId !== null,
     staleTime: 0,
   });
-  const currentIndex = fileId === null ? -1 : fileIds.indexOf(fileId);
+  const currentIndex =
+    fileId === null ? -1 : (fileIndex ?? fileIds.indexOf(fileId));
   const totalItems = fileIds.length;
   const canGoPrev = currentIndex > 0;
   const canGoNext = currentIndex >= 0 && currentIndex < totalItems - 1;
   const fileNotFound = isNotFoundError(error);
+  const selectIndex = useCallback(
+    (index: number) => {
+      const id = fileIds[index] ?? null;
+      if (fileIndex === undefined) setFileId(id);
+      else setFileId(id, index);
+    },
+    [fileIds, fileIndex, setFileId]
+  );
 
   // Keep the page fixed behind the viewer. Image gestures are handled locally,
   // so the browser viewport never needs to zoom or scroll.
@@ -84,20 +99,20 @@ export function FileLightbox({
       if (event.key === "ArrowLeft" && canGoPrev) {
         event.preventDefault();
         event.stopPropagation();
-        setFileId(fileIds[currentIndex - 1] ?? null);
+        selectIndex(currentIndex - 1);
         return;
       }
 
       if (event.key === "ArrowRight" && canGoNext) {
         event.preventDefault();
         event.stopPropagation();
-        setFileId(fileIds[currentIndex + 1] ?? null);
+        selectIndex(currentIndex + 1);
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [canGoNext, canGoPrev, currentIndex, fileId, fileIds, setFileId]);
+  }, [canGoNext, canGoPrev, currentIndex, fileId, selectIndex, setFileId]);
 
   useEffect(() => {
     if (fileId !== null && fileNotFound) setFileId(null);
@@ -113,7 +128,11 @@ export function FileLightbox({
 
   const src = file ? `${file.url}?t=${encodeURIComponent(file.updatedAt)}` : "";
   const displayName = file ? stripTimestamp(file.name) : "";
-  const caption = file ? file.description || displayName : "";
+  const caption = file
+    ? attachmentCaption !== undefined
+      ? attachmentCaption || displayName
+      : file.description || displayName
+    : "";
   const isText = file?.media === "text";
   const isMarkdown = file?.mimeType === "text/markdown";
   const isHtml = file?.mimeType === "text/html";
@@ -181,7 +200,7 @@ export function FileLightbox({
               "h-11 w-11 sm:h-9 sm:w-9",
               isImage && "text-white hover:bg-white/15 hover:text-white"
             )}
-            onClick={() => setFileId(fileIds[currentIndex - 1] ?? null)}
+            onClick={() => selectIndex(currentIndex - 1)}
           >
             <ChevronLeft className="h-6 w-6 sm:h-5 sm:w-5" />
           </Button>
@@ -203,7 +222,7 @@ export function FileLightbox({
               "h-11 w-11 sm:h-9 sm:w-9",
               isImage && "text-white hover:bg-white/15 hover:text-white"
             )}
-            onClick={() => setFileId(fileIds[currentIndex + 1] ?? null)}
+            onClick={() => selectIndex(currentIndex + 1)}
           >
             <ChevronRight className="h-6 w-6 sm:h-5 sm:w-5" />
           </Button>
@@ -293,15 +312,9 @@ export function FileLightbox({
             src={src}
             alt={caption}
             onPrevious={
-              canGoPrev
-                ? () => setFileId(fileIds[currentIndex - 1] ?? null)
-                : undefined
+              canGoPrev ? () => selectIndex(currentIndex - 1) : undefined
             }
-            onNext={
-              canGoNext
-                ? () => setFileId(fileIds[currentIndex + 1] ?? null)
-                : undefined
-            }
+            onNext={canGoNext ? () => selectIndex(currentIndex + 1) : undefined}
           />
         )}
       </div>

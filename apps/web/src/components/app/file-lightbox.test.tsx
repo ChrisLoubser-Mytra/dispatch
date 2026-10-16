@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -56,6 +57,81 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("FileLightbox", () => {
+  it.each([0, 1])(
+    "navigates repeated file IDs by occurrence starting at %s",
+    (initialIndex) => {
+      apiMock.mockImplementation(pendingRequest);
+      const client = queryClient();
+      client.setQueryData(fileItemQueryKey(7), file("2026-08-31T00:00:00Z"));
+      function Viewer() {
+        const [index, setIndex] = useState(initialIndex);
+        return (
+          <FileLightbox
+            fileId={7}
+            fileIds={[7, 7]}
+            fileIndex={index}
+            attachmentCaption={["Overview", "Detail"][index]}
+            setFileId={(_id, nextIndex) => {
+              if (nextIndex !== undefined) setIndex(nextIndex);
+            }}
+          />
+        );
+      }
+      render(
+        <QueryClientProvider client={client}>
+          <Viewer />
+        </QueryClientProvider>
+      );
+      expect(screen.getByRole("dialog").getAttribute("aria-label")).toBe(
+        initialIndex ? "Detail" : "Overview"
+      );
+      if (initialIndex)
+        fireEvent.click(screen.getByTestId("file-lightbox-prev"));
+      expect(screen.getByText("1/2")).toBeTruthy();
+      expect(screen.getByRole("dialog").getAttribute("aria-label")).toBe(
+        "Overview"
+      );
+      fireEvent.click(screen.getByTestId("file-lightbox-next"));
+      expect(screen.getByRole("dialog").getAttribute("aria-label")).toBe(
+        "Detail"
+      );
+      expect(screen.getByText("2/2")).toBeTruthy();
+      fireEvent.keyDown(window, { key: "ArrowLeft" });
+      expect(screen.getByRole("dialog").getAttribute("aria-label")).toBe(
+        "Overview"
+      );
+      fireEvent.keyDown(window, { key: "ArrowRight" });
+      expect(screen.getByRole("dialog").getAttribute("aria-label")).toBe(
+        "Detail"
+      );
+    }
+  );
+
+  it.each([
+    ["Post label", "Post label"],
+    ["", "shot.png"],
+  ])(
+    "uses the attachment caption %s without registry metadata",
+    (attachmentCaption, label) => {
+      apiMock.mockImplementation(pendingRequest);
+      const client = queryClient();
+      client.setQueryData(fileItemQueryKey(7), file("2026-08-31T00:00:00Z"));
+      render(
+        <QueryClientProvider client={client}>
+          <FileLightbox
+            fileId={7}
+            fileIds={[7]}
+            setFileId={vi.fn()}
+            attachmentCaption={attachmentCaption}
+          />
+        </QueryClientProvider>
+      );
+      expect(screen.getByRole("dialog").getAttribute("aria-label")).toBe(label);
+      expect(screen.getByAltText(label)).toBeTruthy();
+      expect(screen.queryByText("Current shot")).toBeNull();
+    }
+  );
+
   it("paints a seeded file immediately and refreshes its cache-busted URL", async () => {
     apiMock.mockImplementation(pendingRequest);
     const client = queryClient();

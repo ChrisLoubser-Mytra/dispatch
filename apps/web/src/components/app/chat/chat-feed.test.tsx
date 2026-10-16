@@ -109,7 +109,7 @@ const REVIEWER_PEER = {
 function fileAttachment(
   fields: Pick<
     Extract<ChatAttachment, { type: "file" }>,
-    "fileId" | "fileName" | "sizeBytes" | "mimeType" | "media"
+    "fileId" | "fileName" | "sizeBytes" | "mimeType" | "media" | "caption"
   >
 ): ChatAttachment {
   // As the server reads it back: `media` from the file's type.
@@ -1722,6 +1722,89 @@ describe("ChatFeed", () => {
     expect((option as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("keeps captions with each image and independent across posts using the same file", () => {
+    const image = (id: number, caption?: string) =>
+      fileAttachment({
+        fileId: id,
+        fileName: `image-${id}.png`,
+        sizeBytes: 12,
+        mimeType: "image/png",
+        caption,
+      });
+    const { onOpenFile } = renderFeed([
+      blockEntry(
+        block({
+          id: "gallery",
+          text: "**Body**",
+          attachments: [
+            image(1, "First image"),
+            image(2, "Second image"),
+            image(3),
+          ],
+        })
+      ),
+      blockEntry(
+        block({
+          id: "single",
+          attachments: [image(1, "Same file, new caption")],
+        })
+      ),
+    ]);
+    expect(
+      screen
+        .getAllByTestId("chat-attachment-caption")
+        .map((el) => el.textContent)
+    ).toEqual(["First image", "Second image", "Same file, new caption"]);
+    expect(screen.getByText("Body")).toBeTruthy();
+    const tiles = screen.getAllByTestId("chat-attachment-gallery-tile");
+    expect(tiles[0].closest("figure")?.textContent).toContain("First image");
+    expect(tiles[1].closest("figure")?.textContent).toContain("Second image");
+    expect(tiles[2].getAttribute("aria-label")).toContain("image-3.png");
+    fireEvent.click(tiles[1]);
+    expect(onOpenFile).toHaveBeenLastCalledWith(2, [1, 2, 3], {
+      captions: ["First image", "Second image", ""],
+      index: 1,
+    });
+    fireEvent.click(
+      screen.getByTestId("chat-attachment-image").querySelector("button")!
+    );
+    expect(onOpenFile).toHaveBeenLastCalledWith(1, undefined, {
+      captions: ["Same file, new caption"],
+      index: 0,
+    });
+    expect(screen.getByAltText("Same file, new caption")).toBeTruthy();
+  });
+
+  it("opens repeated files by attachment occurrence", () => {
+    const image = (caption: string) =>
+      fileAttachment({
+        fileId: 1,
+        fileName: "same.png",
+        sizeBytes: 12,
+        mimeType: "image/png",
+        caption,
+      });
+    const { onOpenFile } = renderFeed([
+      blockEntry(
+        block({
+          id: "repeated",
+          attachments: [image("Overview"), image("Detail")],
+        })
+      ),
+    ]);
+    const tiles = screen.getAllByTestId("chat-attachment-gallery-tile");
+    fireEvent.click(tiles[0]);
+    expect(onOpenFile).toHaveBeenLastCalledWith(1, [1, 1], {
+      captions: ["Overview", "Detail"],
+      index: 0,
+    });
+    fireEvent.click(tiles[1]);
+    expect(onOpenFile).toHaveBeenLastCalledWith(1, [1, 1], {
+      captions: ["Overview", "Detail"],
+      index: 1,
+    });
+  });
+
   it("renders a file attachment by its media, not by its name", () => {
     renderFeed([
       blockEntry(
@@ -1789,7 +1872,10 @@ describe("ChatFeed", () => {
     expect(tiles[0]!.getAttribute("aria-label")).toBe("shot-1.png (512 B)");
     expect(tiles[0]!.querySelector("img")?.getAttribute("alt")).toBe("");
     fireEvent.click(tiles[5]!);
-    expect(onOpenFile).toHaveBeenCalledWith(6, [1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(onOpenFile).toHaveBeenCalledWith(6, [1, 2, 3, 4, 5, 6, 7, 8], {
+      captions: Array(8).fill(""),
+      index: 5,
+    });
     // The gallery sits where the first image was; the file keeps its card.
     const gallery = screen.getByTestId("chat-attachment-gallery");
     const file = screen.getByTestId("chat-attachment-file");
@@ -1908,7 +1994,10 @@ describe("ChatFeed", () => {
       `/api/v1/agents/${AGENT_ID}/files/shot.png`
     );
     fireEvent.click(image.querySelector("button")!);
-    expect(onOpenFile).toHaveBeenCalledWith(7);
+    expect(onOpenFile).toHaveBeenCalledWith(7, undefined, {
+      captions: [""],
+      index: 0,
+    });
 
     expect(screen.getByTestId("chat-attachment-file").textContent).toContain(
       "notes.md"
@@ -2123,7 +2212,10 @@ describe("ChatFeed", () => {
     const image = screen.getByTestId("chat-attachment-image");
     expect(image.querySelector("img")).toBeTruthy();
     fireEvent.click(image.querySelector("button")!);
-    expect(onOpenFile).toHaveBeenCalledWith(3);
+    expect(onOpenFile).toHaveBeenCalledWith(3, undefined, {
+      captions: [""],
+      index: 0,
+    });
   });
 });
 
