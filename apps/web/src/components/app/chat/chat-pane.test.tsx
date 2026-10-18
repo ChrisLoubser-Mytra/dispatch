@@ -288,6 +288,14 @@ function typeAndSend(text: string) {
 }
 
 beforeEach(() => {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn(() => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }))
+  );
   markdownRenders.count = 0;
   H.entries = [];
   H.unreadCount = 0;
@@ -307,6 +315,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   cleanup();
 });
 
@@ -579,6 +588,49 @@ describe("ChatPane", () => {
       text: "do this",
       to: "agt_child",
     });
+  });
+
+  it("disables MCP inventory for an offline selected agent", () => {
+    renderPane({ agent: { ...agent, status: "stopped" } });
+    expect(screen.queryByRole("button", { name: "MCP servers" })).toBeNull();
+    typeAndSend("/mcp");
+    expect(screen.queryByRole("dialog", { name: "MCP servers" })).toBeNull();
+    expect(
+      vi.mocked(api).mock.calls.some(([url]) => url.endsWith("/mcp-inventory"))
+    ).toBe(false);
+  });
+
+  it("opens MCP inventory locally via slash command for the selected child", async () => {
+    vi.mocked(api).mockClear();
+    H.rootId = "agt_root";
+    H.entries = [blockEntry(block({ id: "human-chat", text: "hi" }))];
+    const previous = vi.mocked(api).getMockImplementation();
+    vi.mocked(api).mockImplementation(async (url) =>
+      url.endsWith("/mcp-inventory")
+        ? ({
+            agentId: "agt_child",
+            status: "ok",
+            inventory: { version: 1, servers: [] },
+          } as never)
+        : ({ agents: H.agents } as never)
+    );
+    try {
+      renderPane({
+        agentId: "agt_child",
+        agent: { ...agent, id: "agt_child" },
+      });
+      expect(screen.queryByRole("button", { name: "MCP servers" })).toBeNull();
+      typeAndSend("/mcp");
+      await screen.findByText("No MCP servers reported.");
+      const requests = vi
+        .mocked(api)
+        .mock.calls.filter(([url]) => url.endsWith("/mcp-inventory"));
+      expect(requests).toHaveLength(1);
+      expect(requests[0]![0]).toBe("/api/v1/agents/agt_child/mcp-inventory");
+      expect(H.send).not.toHaveBeenCalled();
+    } finally {
+      if (previous) vi.mocked(api).mockImplementation(previous);
+    }
   });
 
   it("posts to the root with no recipient from the root's own page", async () => {
