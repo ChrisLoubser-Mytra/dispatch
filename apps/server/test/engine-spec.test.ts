@@ -49,6 +49,18 @@ describe("engineSpecFor", () => {
     );
   });
 
+  it("opts Claude sessions into the Artifact tool", () => {
+    vi.stubEnv("DISPATCH_ACP_ADAPTER_COMMAND", "");
+    const bins = { claudeBin: "/x/claude", codexBin: "/x/codex" };
+    expect(engineSpecFor("claude", bins).env.CLAUDE_CODE_ARTIFACT).toBe("1");
+    expect(engineSpecFor("claude", bins, false).env.CLAUDE_CODE_ARTIFACT).toBe(
+      "1"
+    );
+    expect(
+      engineSpecFor("codex", bins).env.CLAUDE_CODE_ARTIFACT
+    ).toBeUndefined();
+  });
+
   it("refuses a launch whose CLI it could not find, rather than letting the adapter pick its own", () => {
     vi.stubEnv("DISPATCH_ACP_ADAPTER_COMMAND", "");
     // Unset, codex-acp falls back to the @openai/codex it depends on.

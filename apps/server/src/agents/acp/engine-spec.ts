@@ -143,7 +143,12 @@ export function engineSpecFor(
           ...adapterCommand(engine, bins).args,
           ...(fullAccess ? ["--dangerously-skip-permissions"] : []),
         ],
-        env: { CLAUDE_CODE_EXECUTABLE: bin },
+        env: {
+          CLAUDE_CODE_EXECUTABLE: bin,
+          // Claude Code leaves the Artifact tool off in Agent SDK sessions
+          // unless this is set; its own off-switches still win over it.
+          CLAUDE_CODE_ARTIFACT: "1",
+        },
         personaDelivery: "system_prompt",
         fullAccess: { kind: fullAccess ? "args" : "approval" },
         subagentTranscripts: true,
